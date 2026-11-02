@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Сборка
+target/
+build/
+out/
+.gradle/
+
+# Локальные настройки Claude Code
+.claude/settings.local.json
+
+# Секреты и локальные данные
+secret.key
+*.key
+*.pem
+.env
+.env.*
