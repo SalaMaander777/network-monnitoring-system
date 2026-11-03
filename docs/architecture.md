@@ -330,6 +330,8 @@ CREATE TABLE audit_log (
 CREATE INDEX ix_audit_ts ON audit_log (ts DESC);
 ```
 
+Начальные значения `system_setting` не равноправны по источнику: `retention.*` взяты из раздела 6 ТЗ, `traps.udp_port` из SNMP-08, а `session.timeout_minutes=720`, `auth.lock_attempts=5`, `auth.lock_minutes=15` в ТЗ не заданы (AUTH-07 и AUTH-08 требуют только настраиваемости) и являются допущениями A-2, A-3 (§15). Все шесть правятся администратором в настройках (`/api/settings`, T1.07, механизм OPS-08) без изменения миграции. Источники по ключам: §13.2.
+
 ### 4.3 Решения по схеме
 
 - **Мягкое удаление.** Устройство получает `deleted_at`, а `profile_id` и `group_id` обнуляются: история к ним не привязана, поэтому удалённое устройство не мешает удалить профиль или группу (PRF-06 проверяет только действующие). Строка не удаляется, поэтому `event`, `alarm` и `check_result` сохраняют ссылку. Частичный индекс `ux_device_ip_active` даёт уникальность IP только среди действующих. Дубль определяется этим индексом, а не предварительным SELECT: так гонка двух одновременных созданий исключена.
@@ -679,7 +681,7 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 
 ### 12.2 PostgreSQL в тестах
 
-`io.zonky.test:embedded-postgres` на один процесс JVM: класс `testsupport.TestPostgres` запускает сервер один раз (порт случайный, каталог временный) и сам реализует `ApplicationContextInitializer<ConfigurableApplicationContext>`, передавая `spring.datasource.url/username/password`. Подключение: `@ContextConfiguration(initializers = TestPostgres.class)` (в T1.01 прямо на `SmokeTest`, с T1.03 внутри `@IntegrationTest`). Первый запуск берёт двоичные файлы из артефакта Maven, поэтому интернет нужен только для `prepare-offline` [ПОДТВ на macOS x86_64 в пробном проекте; платформы §3; Windows ЧЕЛОВЕК]. Docker не нужен. Не запускать тесты от администратора Windows: `initdb` откажет [ЧЕЛОВЕК].
+`io.zonky.test:embedded-postgres` на один процесс JVM: класс `testsupport.TestPostgres` запускает сервер один раз (порт случайный, каталог временный) и сам реализует `ApplicationContextInitializer<ConfigurableApplicationContext>`, передавая `spring.datasource.url/username/password`. Подключение: `@ContextConfiguration(initializers = TestPostgres.class)` (в T1.01 прямо на `SmokeTest`, с T1.03 внутри `@IntegrationTest`). `SmokeTest` несёт `@DirtiesContext(classMode = BEFORE_CLASS)` (с T1.02): он проверяет журнал запуска, а контекст из кеша Spring запуск не выводит. Первый запуск берёт двоичные файлы из артефакта Maven, поэтому интернет нужен только для `prepare-offline` [ПОДТВ на macOS x86_64 в пробном проекте; платформы §3; Windows ЧЕЛОВЕК]. Docker не нужен. Не запускать тесты от администратора Windows: `initdb` откажет [ЧЕЛОВЕК].
 
 Тестовые помощники (`server/src/test/java/ru/netmon/testsupport`; `TestPostgres` создаёт T1.01, остальные T1.03, далее только добавления через `architect`):
 
@@ -694,6 +696,8 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 | `RestartableApp` | Запуск приложения через `SpringApplicationBuilder` на той же БД, остановка, повтор; реальный порт |
 
 Профиль `test`: `nm.poll.enabled=false`, `nm.jobs.enabled=false`, `nm.traps.enabled=false`, `nm.seed.enabled=false`. Каждый тест включает нужное явно.
+
+**Общая БД JVM.** Одна БД на процесс, очистка `@IntegrationTest` только перед тестом, поэтому данные последнего теста класса остаются до следующего `@IntegrationTest`. Правила: тест, читающий или пишущий таблицы приложения, помечается `@IntegrationTest` (исключение: `SmokeTest`, он данных не пишет); тест не полагается на пустоту таблиц и значения настроек без очистки `TestDb`; тест, меняющий `system_setting`, возвращает настройки в `@AfterEach` через `TestDb`; строка в `check_result_default` (по POLL-09 признак сбоя) удаляется тем же тестом, который её создал, в `finally`. Причина: порядок классов в Surefire не задан, а `RestartableApp` и классы вне `@IntegrationTest` видят оставшиеся данные.
 
 **Каталог данных в тестах.** Свойство `nm.data-dir` (а не `nm.secret-key-file`) указывает на временный каталог процесса JVM: `TestPostgres` создаёт его один раз через `Files.createTempDirectory("nm-test-data-")` рядом с запуском PostgreSQL, удаляет хуком завершения JVM и передаёт вместе с `spring.datasource.*`. Набор свойств отдаёт `public static Map<String,String> TestPostgres.properties()`; `initialize` и `RestartableApp` берут свойства только оттуда, поэтому перезапуск видит тот же ключ. `nm.secret-key-file` и `nm.tiles-file` выводятся из `nm.data-dir` по §13 и в тестах не задаются; тест, которому нужен свой файл ключа, задаёт `nm.secret-key-file` на `@TempDir` явно. В `application-test.yml` свойство не пишется. Причина: каталог должен быть один на JVM и вне дерева исходников, а значение в YAML либо относительное (`./data` от рабочего каталога даёт `server/data/`), либо через `${random.uuid}`, который вычисляется заново при каждом разрешении. Распределение: T1.03 вводит `properties()` с `spring.datasource.*`, T1.21 добавляет в него `nm.data-dir`. До T1.21 файлы в `nm.data-dir` никто не пишет.
 
@@ -717,6 +721,8 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 
 ## 13. Настройки запуска (`application.yml` + внешний `config/application.yml`)
 
+### 13.1 Свойства запуска
+
 | Ключ | Умолчание | Смысл |
 |---|---|---|
 | `server.port` | 8080 | Порт интерфейса |
@@ -731,6 +737,19 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 | `nm.traps.enabled` | true | Приём трапов |
 | `nm.seed.enabled` | true | Начальные данные |
 
+### 13.2 Настройки в БД (`system_setting`, §4.2)
+
+Правятся администратором через `/api/settings` (T1.07) и применяются без перезапуска. Начальное значение пишет миграция `V0102`, после правки действует значение из БД.
+
+| Ключ | Начальное значение | Источник |
+|---|---|---|
+| `retention.results_days` | 30 | Раздел 6 ТЗ |
+| `retention.journal_days` | 365 | Раздел 6 ТЗ |
+| `traps.udp_port` | 162 | SNMP-08 |
+| `session.timeout_minutes` | 720 | Допущение A-2 (§15); ТЗ требует только настраиваемости (AUTH-07) |
+| `auth.lock_attempts` | 5 | Допущение A-3 (§15); ТЗ требует только настраиваемости (AUTH-08) |
+| `auth.lock_minutes` | 15 | Допущение A-3 (§15); ТЗ требует только настраиваемости (AUTH-08) |
+
 ## 14. Правила кода
 
 - Время только из внедрённого `Clock`, не `Instant.now()`. Интервалы ожидания в тестах только опросом условия с предельным сроком, не `sleep`.
@@ -744,8 +763,8 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 | ID | Допущение | Как снять |
 |---|---|---|
 | A-1 | IP устройства только IPv4 | Заказчик сообщит о потребности в IPv6 |
-| A-2 | Срок сессии 12 часов простоя: смена дежурного не должна быть прервана входом, правится настройкой | Заказчик |
-| A-3 | Блокировка после 5 неудач на 15 минут; минимальная длина пароля 8 символов | Заказчик |
+| A-2 | Срок сессии 12 часов простоя (`session.timeout_minutes=720`): смена дежурного не должна быть прервана входом, правится настройкой | Заказчик |
+| A-3 | Блокировка после 5 неудач на 15 минут (`auth.lock_attempts=5`, `auth.lock_minutes=15`), правится настройкой; минимальная длина пароля 8 символов | Заказчик |
 | A-4 | Трап-тревога вкладывает в статус всегда WARNING, уровень тревоги задаёт правило | Заказчик |
 | A-5 | Подлинность трапа определяется по IP источника, community не проверяется | Заказчик или проверка на сети |
 | A-6 | Установщик: архив и сценарии PowerShell 5.1, а не отдельный установщик Windows | Человек на Windows |

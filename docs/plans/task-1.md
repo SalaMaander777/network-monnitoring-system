@@ -48,29 +48,53 @@
 **Цель:** весь DDL раздела §4.2 применяется Flyway, и его ограничения подтверждены тестами.
 **Исполнитель:** backend-core. **Зависит от:** T1.01.
 
-**Файлы:** `R/db/migration/V0102__core_schema.sql`, `T/schema/SchemaConstraintsTest.java`.
+**Файлы:** `R/db/migration/V0102__core_schema.sql`, `T/schema/SchemaConstraintsTest.java`, `T/SmokeTest.java` (только шаг 3).
 
-**Контракты:** §4.1, §4.2, §4.3.
+**Контракты:** §4.1, §4.2, §4.3, §12.2.
 
-**Шаги:** перенести DDL §4.2 дословно. Написать тесты прямым SQL через `JdbcClient`, без классов приложения.
+**Шаги:**
+1. Миграция: содержимое блока `sql` §4.2 от первой до последней строки дословно, без добавлений. Проверено architect: применяется Flyway 12.4 на встроенном PostgreSQL 18.6 в режиме `-o`.
+2. `SchemaConstraintsTest`: `@SpringBootTest`, `@ActiveProfiles("test")`, `@ContextConfiguration(initializers = TestPostgres.class)`, внедрённый `JdbcClient`; только прямой SQL, без классов приложения, без `@Transactional` (после ошибки ограничения транзакция PostgreSQL прерывается). `TestDb` появится в T1.03, поэтому каждый метод создаёт свои строки с уникальными значениями (IP, логины, имена), не зависит от порядка методов и других классов и не меняет `system_setting`. В негативном случае все поля, кроме проверяемого, допустимы, и строка нарушает ровно одно ограничение.
+3. `SmokeTest`: добавить `@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)`, остальное без изменений. Причина: `SchemaConstraintsTest` имеет ту же конфигурацию контекста, Spring берёт контекст из кеша, и `Started SmokeTest in` не выводится (воспроизведено architect: `SmokeTest` падает в `verify`).
 
-**Обязательные тесты (каждый отдельным методом):**
-- Позитив: все таблицы созданы; запись `check_result` попадает в `check_result_default`.
-- Дубль IP среди действующих отклоняется; IP удалённого устройства можно использовать снова; удаление устройства с занятым IP не конфликтует.
-- `ip` с маской `10.0.0.1/24` и IPv6 отклоняются; `lat=90.000001`, `lon=-180.000001` отклоняются, граничные 90 и -180 проходят.
-- Вторая основная проверка в профиле отклоняется; основная с `required=false` отклоняется; неверный `kind` отклоняется; `interval_sec=4` отклоняется.
-- Секрет без привязки и с двумя привязками отклоняются; второй секрет того же устройства отклоняется.
-- Вторая активная тревога с тем же ключом отклоняется; после закрытия первой новая проходит; `ended_at` без `close_reason` отклоняется.
-- Правило `ALARM` без уровня и `CLOSE` без `pair_key` отклоняются; `trap_oid` с буквами отклоняется.
-- Логин без учёта регистра уникален (`Admin` и `admin`).
-- Действующее устройство без профиля отклоняется; удалённое без профиля проходит.
-- Настройки §4.2 созданы со значениями умолчания раздела 6 ТЗ.
+**Проверка нарушения:** исключение `DataAccessException`; в цепочке причин `org.postgresql.util.PSQLException`; сверяются `getSQLState()` и `getServerErrorMessage().getConstraint()` с таблицей. Имена ограничений `*_check` присваивает PostgreSQL по дословному DDL §4.2 (получены прогоном architect).
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest=SchemaConstraintsTest`
+| Случай | SQLSTATE | Ограничение |
+|---|---|---|
+| Дубль IP действующих | `23505` | `ux_device_ip_active` |
+| `ip` `10.0.0.1/24`, IPv6 `::1` | `23514` | `device_ip_check` |
+| `lat=90.000001` / `lon=-180.000001` | `23514` | `device_lat_check` / `device_lon_check` |
+| Вторая основная проверка | `23505` | `ux_profile_check_primary` |
+| Основная с `required=false` (`enabled=true`) | `23514` | `profile_check_check` |
+| `kind='HTTP'` | `23514` | `profile_check_kind_check` |
+| `interval_sec=4` | `23514` | `profile_check_interval_sec_check` |
+| Секрет без привязки / с `device_id` и `group_id` | `23514` | `access_secret_check` |
+| Второй секрет устройства | `23505` | `ux_secret_device` |
+| Вторая активная тревога `(device_id, reason_key)` | `23505` | `ux_alarm_active` |
+| `ended_at` без `close_reason` | `23514` | `alarm_check` |
+| `ALARM` без `level` (с `pair_key`) | `23514` | `trap_rule_check` |
+| `CLOSE` без `pair_key` | `23514` | `trap_rule_check1` |
+| `trap_oid='1.3.6.a'` (`action='EVENT'`) | `23514` | `trap_rule_trap_oid_check` |
+| `admin` при существующем `Admin` | `23505` | `ux_app_user_login` |
+| Действующее устройство без профиля | `23514` | `device_check` |
 
-**Критерии готовности:** все методы зелёные; миграция идентична §4.2 (расхождение только с разрешения `architect`).
+**Обязательные тесты (каждая строка отдельным методом):**
+- `tablesAndDefaultPartition`: множество `relname` из `pg_class` схемы `public` с `relkind in ('r','p')` без `flyway_schema_history` в точности равно: `access_secret`, `alarm`, `app_user`, `audit_log`, `check_result`, `check_result_default`, `check_state`, `device`, `device_group`, `device_type`, `event`, `profile`, `profile_check`, `system_setting`, `trap_rule`; `check_result` имеет `relkind='p'`; вставленная строка `check_result` с `ts=now()` имеет `tableoid::regclass::text = 'check_result_default'`.
+- `deviceIpUniqueAmongActive`: дубль IP действующего отклоняется; после мягкого удаления первого (`UPDATE device SET deleted_at=now(), profile_id=NULL`) тот же IP проходит; мягкое удаление второго при уже удалённом первом с тем же IP проходит; третий действующий с тем же IP проходит.
+- `deviceIpAndCoordinates`: `ip` `10.0.0.1/24` и `::1` отклоняются; `lat=90.000001`, `lon=-180.000001` отклоняются; `lat=90`, `lon=-180` проходят.
+- `profileCheckConstraints`: вторая основная, основная с `required=false`, `kind='HTTP'`, `interval_sec=4` отклоняются.
+- `accessSecretBinding`: без привязки и с двумя привязками отклоняются; первый секрет устройства проходит, второй отклоняется.
+- `alarmActiveUniqueAndClose`: вторая активная с тем же ключом отклоняется; после `UPDATE alarm SET ended_at=now(), close_reason='RECOVERED'` первой новая проходит; `ended_at` без `close_reason` отклоняется.
+- `trapRuleConstraints`: три случая `trap_rule` из таблицы отклоняются.
+- `loginUniqueIgnoringCase`: `Admin` проходит, `admin` отклоняется.
+- `deviceProfileRequiredUnlessDeleted`: действующее без профиля отклоняется; с `deleted_at=now()` без профиля проходит.
+- `defaultSettings`: пары `key -> value` из `system_setting` в точности равны шести строкам `INSERT` §4.2 (`retention.results_days=30` и `retention.journal_days=365` по разделу 6 ТЗ, `traps.udp_port=162` по SNMP-08; `session.timeout_minutes=720`, `auth.lock_attempts=5`, `auth.lock_minutes=15` в ТЗ не заданы, это допущения A-2 и A-3 архитектуры, источники по ключам в §13.2). Тест сверяет значения миграции, а не требования ТЗ.
 
-**Запрещено:** менять §4.2 самостоятельно; прикладные классы; индексы сверх §4.2.
+**Команда проверки:** `mvn -B -pl server -am test -Dtest=SchemaConstraintsTest && scripts/offline-verify.sh`
+
+**Критерии готовности:** все методы зелёные; `scripts/offline-verify.sh` зелёный вместе с `SmokeTest` и `EmulatorMainTest`; миграция построчно равна блоку §4.2 (расхождение только с разрешения `architect`).
+
+**Запрещено:** менять §4.2 самостоятельно; прикладные классы; индексы сверх §4.2; иные изменения `SmokeTest`, кроме шага 3.
 
 ---
 
@@ -79,7 +103,7 @@
 **Цель:** все межмодульные типы и интерфейсы §7 существуют и защищены тестом границ, чтобы дальше исполнители работали параллельно.
 **Исполнитель:** backend-core. **Зависит от:** T1.02.
 
-**Файлы:** `S/contract/*.java` (группируются вложенными record и enum по §7.1, допустимо до 25 небольших файлов без логики, это исключение правила о числе файлов), `S/contract/events/*.java`, `S/stream/SeqStreamPublisher.java`, `S/common/ClockConfig.java`, `T/testsupport/` (`IntegrationTest`, `TestDb`, `TestData`, `MutableClock`, `Api`, `LogCapture`, `RestartableApp`; правка `TestPostgres` по шагу 6), `T/ArchitectureTest.java`, `T/contract/ContractTypesTest.java`.
+**Файлы:** `S/contract/*.java` (группируются вложенными record и enum по §7.1, допустимо до 25 небольших файлов без логики, это исключение правила о числе файлов), `S/contract/events/*.java`, `S/stream/SeqStreamPublisher.java`, `S/common/ClockConfig.java`, `T/testsupport/` (`IntegrationTest`, `TestDb`, `TestData`, `MutableClock`, `Api`, `LogCapture`, `RestartableApp`; правка `TestPostgres` по шагу 6), `T/ArchitectureTest.java`, `T/contract/ContractTypesTest.java`, `T/schema/SchemaConstraintsTest.java` (только шаг 7).
 
 **Контракты:** §2.2, §7.1, §7.2, §12.2, §14.
 
@@ -90,17 +114,25 @@
 4. `ArchitectureTest` с правилами §2.2 пунктов 1, 2, 4. Правило 3 для контроллеров: пока контроллеров нет, правило активируется `allowEmptyShould(true)`.
 5. Помощники §12.2. `Api` использует `SecurityMockMvcRequestPostProcessors.user(...)` и `csrf()`. `RestartableApp` запускает реальный Tomcat на случайном порту.
 6. В `T/testsupport/TestPostgres.java` добавить `public static Map<String,String> properties()` (пока только `spring.datasource.url/username/password`); `initialize` и `RestartableApp` передают свойства только из него (§12.2, «Каталог данных в тестах»). Других изменений `TestPostgres` нет.
+7. `SchemaConstraintsTest` (замечания ревью T1.02), других изменений нет:
+   1. Заменить `@SpringBootTest`, `@ActiveProfiles`, `@ContextConfiguration` на `@IntegrationTest`: очистка `TestDb` перед каждым методом убирает зависимость от данных и настроек других классов. Запрет `@Transactional` сохраняется.
+   2. `defaultSettings`: читать `key, value` из `system_setting where key in (...)` по шести ключам §4.2 и сверять эти шесть пар; не сравнивать всю таблицу. Причина: набор ключей расширяется только миграциями, а сверка всей таблицы ломается от лишней строки, не относящейся к тесту.
+   3. `tablesAndDefaultPartition`: `relkind` читать по `'public.check_result'::regclass` (`select relkind::text from pg_class where oid = 'public.check_result'::regclass`), без поиска по `relname` без схемы.
+   4. `tablesAndDefaultPartition`: вставленную строку `check_result` удалить в `finally` того же метода (`delete from check_result where device_id=? and check_id=?`, число строк 1). Причина: по POLL-09 строка в `check_result_default` означает сбой, тесты разделов и здоровья задачи 3 не должны её видеть.
+   5. Проверка нарушения: перед `getServerErrorMessage().getConstraint()` утверждать `getServerErrorMessage()` не `null` с сообщением, содержащим SQL; так вместо NPE тест падает с понятной причиной.
+   6. Каждый `update` подготовки (мягкое удаление устройства, закрытие тревоги и другие `UPDATE`) сверять с числом строк 1: `assertThat(...update()).isEqualTo(1)`.
 
 **Обязательные тесты:**
 - `ContractTypesTest`: порядок `DeviceStatus` = худший первым; `toString` секретных типов не содержит значения; `equals` и логирование через `String.valueOf` также не раскрывают значение.
+- `SchemaConstraintsTest`: зелёный после шага 7; в отчёте показать, что метод с `UPDATE` по несуществующему `id` падает на проверке числа строк, и удалить его.
 - `ArchitectureTest`: зелёный; в отчёте показать, что временное нарушение (класс `contract`, импортирующий Spring) ловится, и удалить его.
-- `TestDbSelfTest`: очистка удаляет данные и возвращает настройки к умолчанию; `MutableClock.advance` работает; повторный `RestartableApp` видит те же данные.
+- `TestDbSelfTest`: очистка удаляет данные и возвращает настройки к умолчанию (шесть пар после восстановления равны строкам `INSERT` §4.2, лишние ключи удаляются); `MutableClock.advance` работает; повторный `RestartableApp` видит те же данные.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='ContractTypesTest,ArchitectureTest,TestDbSelfTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='ContractTypesTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest,SmokeTest'`
 
 **Критерии готовности:** тесты зелёные; все интерфейсы таблицы §7.2 присутствуют; логики в `contract` нет.
 
-**Запрещено:** добавлять поля и методы сверх §7; реализовывать интерфейсы (кроме заглушки).
+**Запрещено:** добавлять поля и методы сверх §7; реализовывать интерфейсы (кроме заглушки); менять в `SchemaConstraintsTest` что-либо сверх шага 7 (случаи, SQL вставок, таблицу ограничений T1.02).
 
 ---
 
@@ -204,6 +236,7 @@
 - Границы: минимум и максимум проходят; значение за границей, не число, пустое: 400. Неизвестный ключ: 404.
 - Откат транзакции не меняет кэш и не шлёт событие.
 - Дежурный 403; запись в `audit_log` со старым и новым значением.
+- Возврат настроек: `SettingsApiTest` (`@IntegrationTest`) в `@AfterEach` вызывает восстановление настроек `TestDb`, в том числе после `RestartableApp` и после упавшего теста. Причина: очистка `@IntegrationTest` идёт только перед тестом, а классы вне него (`SmokeTest`) и `RestartableApp` читают `system_setting` той же БД JVM. Это же правило для любого теста, меняющего настройки (§12.2).
 
 **Команда проверки:** `mvn -B -pl server -am test -Dtest='SettingsApiTest,ArchitectureTest'`
 

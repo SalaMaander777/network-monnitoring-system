@@ -9,6 +9,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
 import ru.netmon.testsupport.TestPostgres;
@@ -17,6 +18,7 @@ import ru.netmon.testsupport.TestPostgres;
 @ActiveProfiles("test")
 @ContextConfiguration(initializers = TestPostgres.class)
 @ExtendWith(OutputCaptureExtension.class)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
 class SmokeTest {
 
     @Autowired
