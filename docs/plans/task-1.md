@@ -134,6 +134,13 @@
 
 **Запрещено:** добавлять поля и методы сверх §7; реализовывать интерфейсы (кроме заглушки); менять в `SchemaConstraintsTest` что-либо сверх шага 7 (случаи, SQL вставок, таблицу ограничений T1.02).
 
+**Круг 2 (аудит и ревью T1.03), только `T/testsupport/` и `TestDbSelfTest`; `contract`, `ArchitectureTest`, `SchemaConstraintsTest`, `TestPostgres`, `TestData`, `Api`, `IntegrationTest` не меняются:**
+1. `TestDb` по новой строке таблицы §12.2: снимок настроек на JVM вместо шести строк в коде, `defaults()`, транзакция с `set local lock_timeout = '5s'` в `clean()` и `restoreSettings()`, параметризованная вставка; `CleanBeforeEach` дополнительно вызывает `MutableClock.reset()`.
+2. `MutableClock`: `reset()`, `synchronized` у `set`, `withZone` возвращает представление (§12.2).
+3. `LogCapture`: `setLength(0)` в `beforeEach` вместо отметки, `level(...)` с возвратом уровней в `afterEach` (§12.2).
+4. `RestartableApp.start()`: `IllegalStateException`, если контекст уже запущен.
+5. `TestDbSelfTest`: `@AfterEach` с `db.restoreSettings()`; в `restoreSettingsOnly` `dirty()` внутри `try`, число удалённых строк `check_result_default` сохраняется в `finally` и сверяется с 1 после `try/finally` (как шаг 7.4); проверки настроек после `clean()`/`restoreSettings()` идут против `db.defaults()` плюс «содержит шесть пар §4.2» и «нет `extra`»; новые проверки: `reset()`, `withZone`, повторный `start()`, `LogCapture.level`, `lock_timeout` (чужое соединение держит `lock table device_type in access share mode`, `clean()` падает за время меньше 30 с с корневой `SQLException` SQLState `55P03`, соединение откатывается до конца метода).
+
 ---
 
 ## T1.04. Ошибки API и постраничность
@@ -141,7 +148,7 @@
 **Цель:** все ошибки и постраничные ответы API имеют единый формат без утечки внутренностей.
 **Исполнитель:** backend-core. **Зависит от:** T1.03.
 
-**Файлы:** `S/common/web/ApiException.java`, `FieldError.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`, `T/common/ApiErrorsTest.java` (с тестовым контроллером в `T/`).
+**Файлы:** `S/common/web/ApiException.java`, `FieldError.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`, `T/common/ApiErrorsTest.java`, `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, подключается к `ApiErrorsTest` через `@Import`, §12.2 «Тестовые контроллеры и бины»; пути под `/api/test-errors/`, методы с `@PreAuthorize("permitAll()")`).
 
 **Контракты:** §5.1.
 
@@ -654,11 +661,11 @@
 **Цель:** секрет принимается только на запись с привязкой к устройству или группе, а опрос получает его через `SecretResolver`.
 **Исполнитель:** backend-core. **Зависит от:** T1.21.
 
-**Файлы:** `S/secret/SecretController.java`, `SecretService.java`, `SecretRepository.java`, `T/secret/SecretApiTest.java`, `T/secret/SecretResolverTest.java`, `security-matrix/secret.csv`.
+**Файлы:** `S/secret/SecretController.java`, `SecretService.java`, `SecretRepository.java`, `SecretJacksonConfig.java`, `T/secret/SecretApiTest.java`, `T/secret/SecretResolverTest.java`, `security-matrix/secret.csv`.
 
 **Контракты:** §5.2, §7.2 (`SecretResolver`, `DeviceDeleted`), §10.3, §10.4.
 
-**Шаги:** метаданные и значения в разных классах ответа. Журнал действий только `{id,snmpVersion,deviceId,groupId}`. Подписка `DeviceDeleted` удаляет секрет устройства. Нарушение ссылки на устройство или группу: 400; удалённое устройство: 400 (проверка `deleted_at`).
+**Шаги:** метаданные и значения в разных классах ответа. Журнал действий только `{id,snmpVersion,deviceId,groupId}`. Бин Jackson `Module` в `S/secret/SecretJacksonConfig.java` сериализует любой `SnmpCredentials` строкой `"***"` (§10.4). Подписка `DeviceDeleted` удаляет секрет устройства. Нарушение ссылки на устройство или группу: 400; удалённое устройство: 400 (проверка `deleted_at`).
 
 **Обязательные тесты:**
 - SEC-01: дежурный 403 на всех методах, включая чтение метаданных; секреты только в `access_secret`.
@@ -669,6 +676,7 @@
 - Разрешение: секрет устройства приоритетнее группового; нет секрета: пусто; повреждённый шифртекст: пусто и компонент DEGRADED, значения в логе нет.
 - `DeviceDeleted` удаляет секрет устройства и не трогает секрет группы.
 - `audit_log` не содержит уникальной строки секрета.
+- Внедрённый `ObjectMapper` приложения сериализует `V2c` и `V3` с уникальными строками в `"***"`, уникальных строк в выводе нет.
 
 **Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretApiTest,SecretResolverTest,ArchitectureTest'`
 
@@ -687,7 +695,7 @@
 
 **Контракты:** §10.4, SEC-03, SEC-04.
 
-**Шаги:** уникальные строки для community, паролей v3 и пароля пользователя. Прогнать через все операции секретов и пользователей с уровнем логирования `DEBUG` для `ru.netmon` и `org.springframework.web`. В том числе ошибочные запросы.
+**Шаги:** уникальные строки для community, паролей v3 и пароля пользователя. Прогнать через все операции секретов и пользователей с уровнем логирования `DEBUG` для `ru.netmon` и `org.springframework.web`, заданным через `LogCapture.level(...)` (не свойством `logging.level.*`, §12.2). В том числе ошибочные запросы.
 
 **Обязательные тесты:**
 - Поиск уникальных строк в `LogCapture` после всех операций, включая 400 и 409 на этих эндпоинтах.
