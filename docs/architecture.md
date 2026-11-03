@@ -84,6 +84,13 @@ offline/, tools/        создаются скриптами, не хранят
 3. Классы контроллеров лежат в своём модуле, каждый метод с `@*Mapping` имеет `@PreAuthorize` или входит в короткий список публичных (§5.1).
 4. В `main` нет литералов OID: шаблон `1.3.6.1` запрещён во всём коде, кроме ресурсов `seed/`.
 
+Формулировка в `ArchitectureTest` (archunit-junit5 1.5.1, `@AnalyzeClasses(packages = "ru.netmon", importOptions = ImportOption.DoNotIncludeTests.class)`; проверено прототипом, нарушения ловятся):
+- Модуль класса: первый сегмент пакета после `ru.netmon.`, для `ru.netmon.check.<x>..` это `check.<x>` (`check.ping` и `check.tcp` разные модули). `contract.events` входит в `contract`. Корневой пакет `ru.netmon` (класс приложения) модулем не является и правилу 1 не подчиняется, но и модули от него не зависят.
+- П. 1: собственное `ArchCondition<JavaClass>` на `classes().that().resideInAPackage("ru.netmon.*..")`: каждая прямая зависимость (`getDirectDependenciesFromSelf()`, тип цели через `getBaseComponentType()`) на класс из `ru.netmon` или `ru.netmon..` ведёт в модуль `contract`, `common` или собственный. Внешние библиотеки правилом 1 не ограничены.
+- П. 2: `classes().that().resideInAPackage("ru.netmon.contract..").should().onlyDependOnClassesThat().resideInAnyPackage("java..", "ru.netmon.contract..")`.
+- П. 3, два правила с `allowEmptyShould(true)`: классы, мета-аннотированные `@Controller`, лежат в `ru.netmon.*..` вне `ru.netmon.contract..` и `ru.netmon.common..`; методы, объявленные в таких классах и мета-аннотированные `@RequestMapping`, аннотированы `@PreAuthorize` на самом методе. Публичный метод (§5.1) несёт `@PreAuthorize("permitAll()")`; что именно эти методы и только они публичны, проверяет `SecurityMatrixTest` (T1.26). Причина: правило ArchUnit не сопоставляет пути, а отдельный список имён методов в тесте пришлось бы править каждой задаче.
+- П. 4 не выразим в ArchUnit (литералы строк в теле метода он не импортирует): обычный метод `@Test` в том же классе читает все файлы под `server/src/main` (рабочий каталог Surefire `server/`, путь `src/main`), кроме `src/main/resources/seed/`, и ищет подстроку `1.3.6.1` без регулярного выражения. Модуль `emulators` не проверяется.
+
 Модуль пишет только в свои таблицы. Чтение чужих таблиц SQL-запросом разрешено только там, где это явно указано в карточке (сводка, карточка устройства, отчёты), запись запрещена.
 
 ## 3. Сборка и офлайн (C-5, OPS-10)
@@ -448,7 +455,7 @@ NFR-02: от фиксации транзакции до отправки не б
 
 ## 7. Внутренние контракты (`ru.netmon.contract`)
 
-Сигнатуры обязательны. Все создаёт T1.03. Единственная заглушка: `stream/SeqStreamPublisher` (считает `seq`, не отправляет), T1.24 заменяет её настоящей реализацией.
+Сигнатуры обязательны. Все создаёт T1.03. Единственная заглушка: `stream/SeqStreamPublisher` (`@Component`, реализует `StreamPublisher`, считает `seq` через `AtomicLong`, не отправляет), T1.24 заменяет её настоящей реализацией.
 
 ### 7.1 Типы
 
@@ -491,12 +498,38 @@ sealed interface SnmpCredentials {
       implements SnmpCredentials { /* toString без значения */ }
 }
 
-// Также в contract: DeviceView, DeviceInput, DeviceFilter (§5.3), ProfileView, Actor, CheckView, StatusInput (§8.2).
-// Поля DeviceView и DeviceInput = §5.4, ProfileView = §9.1, CheckView = столбцы check_state + required, primary, enabled, intervalSec.
+// Поля по §5.4 (устройство), §5.3 (фильтр), §9.1 (профиль), столбцам check_state (CheckView), §8.2.
+record DeviceView(long id, String name, long typeId, String typeName, Long groupId, String groupName,
+    InetAddress ip, BigDecimal lat, BigDecimal lon, String address, Long profileId, String profileName, String note,
+    boolean monitoringEnabled, DeviceStatus status, Instant statusChangedAt, Instant createdAt, Instant updatedAt,
+    long version) {}
+
+record DeviceInput(String name, Long typeId, Long groupId, String ip, BigDecimal lat, BigDecimal lon,
+    String address, Long profileId, String note, Boolean monitoringEnabled, Long version) {}
+
+record DeviceFilter(String q, Set<Long> typeIds, Set<Long> groupIds, Set<DeviceStatus> statuses, Boolean monitoring) {}
+
+record ProfileView(long id, String name, String description, long version, List<CheckDefinition> checks) {}
+
+record CheckView(long deviceId, long checkId, Instant lastTs, Boolean lastSuccess, BigDecimal lastValueNum,
+    String lastValueText, CheckError lastError, int consecutiveFailures, int consecutiveSuccesses, CheckHealth health,
+    ThresholdLevel thresholdLevel, int thresholdOkStreak, boolean required, boolean primary, boolean enabled,
+    int intervalSec) {}
+
+record StatusInput(boolean monitoringEnabled, List<CheckView> checks, boolean activeTrapAlarm, Instant now,
+    Instant serverStart) {}
+
+record Actor(long userId, String login) {}
 
 record ComponentHealth(String name, State state, String message, Map<String,String> details) {
   enum State { UP, DEGRADED, DOWN } }
 ```
+
+Правила переноса (проверено компиляцией на Java 21 и прогоном `ArchitectureTest` в прототипе):
+- Каждый тип верхнего уровня из §7.1 и §7.2 в своём файле `ru.netmon.contract.<Имя>.java` с модификатором `public`; импорты только `java.*`. Вложенными остаются только `SnmpCredentials.V2c`, `SnmpCredentials.V3`, `ComponentHealth.State` и `DeviceChanged.ChangeType`; другие группировки по классам-держателям не делаются, имена типов как в §7. Итого 46 файлов в `contract` и 5 в `contract.events`.
+- `DeviceInput.ip` строка: формат §5.4 проверяет `device`, разбор строки в `InetAddress` по имени хоста дал бы обращение к DNS. Обёртки (`Long`, `Boolean`) в `DeviceInput` означают «поле не передано», ошибку обязательного поля даёт проверка `device`.
+- `DeviceFilter`: пустое множество или `null` значит «без ограничения». `ProfileView` без `unconfirmedNote` и `source`: они нужны только API профилей внутри `profile`.
+- `CheckView.lastError` равен `null` при успехе. `Actor.userId` примитив: системного актора нет (§7.2).
 
 ### 7.2 Интерфейсы
 
@@ -504,7 +537,7 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 |---|---|---|---|
 | `CheckExecutor` | `CheckKind kind(); CheckOutcome execute(CheckTask task);` Обязан уложиться в `timeoutMs`, ошибки транспорта возвращает как `CheckOutcome`, не бросает исключения | `check.ping`, `check.tcp` (T3), `snmp` (T4), `check.scpi` (T5) | `poll`, через список бинов |
 | `ResultSink` | `void submit(CheckResult r);` Не блокирует | `poll` | `poll` |
-| `CheckStateMachine` | Чистая функция, §8.1 | `status` | `status` |
+| `CheckStateMachine` | `CheckView apply(CheckView current, CheckDefinition check, CheckResult result, ThresholdLevel target);` Чистая функция, §8.1 и снижение уровня §8.3; `current` до первого результата: `health=UNKNOWN`, счётчики 0, `thresholdLevel=NONE`; `target` от `ThresholdEvaluator` | `status` | `status` |
 | `ThresholdEvaluator` | `ThresholdLevel evaluate(CheckDefinition c, BigDecimal value, ThresholdLevel previous);` Чистая | `alarm` (T6) | `status`, через `ObjectProvider`; до T6 всегда `NONE` |
 | `StatusCalculator` | `DeviceStatus calculate(StatusInput in);` Чистая, §8.2 | `status` | `status` |
 | `CheckTransitionListener` | `void onTransition(CheckTransition t);` Внутри транзакции записи результатов | `alarm` | `status`, список бинов, до T6 пуст |
@@ -522,7 +555,17 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 | `StatusRecalculator` | `void recalculate(long deviceId);` Внутри текущей транзакции, берёт замок строки устройства | `status` | `snmp`, `alarm` |
 | `HealthContributor` | `ComponentHealth health();` Не дольше 1 с | все компоненты | `system` |
 
-Межмодульные события Spring (`contract.events`, рассылаются `ApplicationEventPublisher`):
+Все интерфейсы таблицы лежат в `ru.netmon.contract`, имена и методы ровно как в таблице.
+
+Межмодульные события Spring (`ru.netmon.contract.events`, рассылаются `ApplicationEventPublisher`), сигнатуры:
+
+```java
+public record DeviceChanged(long deviceId, ChangeType change) { public enum ChangeType { CREATED, UPDATED, DELETED } }
+public record DeviceDeleted(long deviceId) {}
+public record MonitoringChanged(long deviceId, boolean enabled) {}
+public record ProfileChanged(long profileId) {}
+public record SettingChanged(String key, String value) {}
+```
 
 | Событие | Когда | Подписчики |
 |---|---|---|
@@ -687,13 +730,20 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 
 | Класс | Назначение |
 |---|---|
-| `@IntegrationTest` | `@SpringBootTest`, `@AutoConfigureMockMvc`, профиль `test`, инициализатор БД, очистка перед каждым тестом |
-| `TestDb` | `TRUNCATE` всех таблиц, кроме `flyway_schema_history` и `system_setting`, восстановление настроек |
-| `TestData` | Построители строк прямым SQL: пользователь, тип, группа, профиль, проверка, устройство |
-| `MutableClock` | Управляемое время, `@Primary Clock` в профиле `test` |
-| `Api` | Запросы MockMvc от роли: `Api.as(ADMIN).post(...)`, с CSRF |
-| `LogCapture` | Захват всего вывода Logback для поиска секрета |
-| `RestartableApp` | Запуск приложения через `SpringApplicationBuilder` на той же БД, остановка, повтор; реальный порт |
+| `@IntegrationTest` | Мета-аннотация: `@SpringBootTest`, `@AutoConfigureMockMvc`, `@ActiveProfiles("test")`, `@ContextConfiguration(initializers = TestPostgres.class)`, `@Import({MutableClock.Config.class, TestDb.class, TestData.class, Api.class})`, `@ExtendWith(TestDb.CleanBeforeEach.class)` |
+| `TestDb` | Бин с `JdbcClient`. `clean()`: одной командой `TRUNCATE` всех таблиц схемы `public` из `pg_class` (`relkind in ('r','p') and not relispartition`), кроме `flyway_schema_history`, включая `system_setting`, без `CASCADE` и без `RESTART IDENTITY`, затем дословно `INSERT` шести строк `system_setting` из §4.2. `restoreSettings()`: `delete from system_setting` и тот же `INSERT`. Вложенный `CleanBeforeEach implements BeforeEachCallback` берёт бин через `SpringExtension.getApplicationContext(context)` и вызывает `clean()` |
+| `TestData` | Бин с `JdbcClient`, построители строк прямым SQL с уникальными значениями: пользователь, тип, группа, профиль, проверка, устройство; возвращают `id` |
+| `MutableClock` | `final class MutableClock extends Clock`, зона UTC, начальное значение `Instant.now()` с точностью до микросекунд, `set(Instant)`, `advance(Duration)`. Вложенный `@TestConfiguration(proxyBeanMethods = false) Config` с `@Bean @Primary MutableClock mutableClock()` |
+| `Api` | Бин с `MockMvc`: `api.as(Role.ADMIN).get/post/put/patch/delete(...)` возвращает `ResultActions`; `SecurityMockMvcRequestPostProcessors.user(...)` с ролью и `csrf()` на каждом запросе. Тип principal меняет T1.05 вместе с `Api` |
+| `LogCapture` | JUnit-расширение (`@RegisterExtension`): `text()` отдаёт всё, что записал Logback с начала метода. Appender `LogCapture.Appender` подключён в `server/src/test/resources/logback-test.xml` вместе с `CONSOLE` из `defaults.xml` и `console-appender.xml` Spring Boot и пишет в статический буфер JVM |
+| `RestartableApp` | `AutoCloseable`: `new RestartableApp(Map<String,String> extraProperties, Class<?>... extraSources)`, `start()`, `stop()`, `restart()`, `port()`, `context()`. `SpringApplicationBuilder(NetMonitoringApplication.class, extraSources...)`, профиль `test`; свойства `TestPostgres.properties()`, затем `extraProperties` и `server.port=0` передаются аргументами `run("--ключ=значение", ...)`. Ошибка запуска выходит исключением из `start()`. `MutableClock` только если тест передал `MutableClock.Config.class` |
+
+Решения по помощникам (проверены прототипом на текущем `server/pom.xml`):
+- `system_setting` очищается вместе со всеми: на неё ссылается `app_user` через `updated_by`, а PostgreSQL не выполняет `TRUNCATE` таблицы, на которую ссылается таблица вне той же команды. `check_result` очищается через родителя, разделы список не пополняют. Без `RESTART IDENTITY`: совпадение `id` разных таблиц не скрывает ошибок.
+- `MutableClock` подменяет `Clock` из `common/ClockConfig` (`@Configuration(proxyBeanMethods = false)`, `@Bean Clock clock()` = `Clock.systemUTC()`) через `@Primary`; имя бина `mutableClock` отличается от `clock`, переопределение бинов в Spring Boot выключено.
+- `RestartableApp` передаёт свойства аргументами командной строки: свойства `SpringApplicationBuilder.properties(...)` имеют низший приоритет, и `application.yml` перебил бы их (в прототипе Tomcat поднялся на 8080 вместо случайного порта; то же было бы с `nm.data-dir` из T1.21).
+- `LogCapture` через `logback-test.xml`: каждый запуск Spring сбрасывает контекст Logback и снимает appender, подключённый из кода (проверено: после `restart()` вывод терялся). Уровни не меняются: тест, которому нужен `DEBUG`, задаёт `logging.level.*` свойством контекста.
+- Кеш контекстов Spring: `SmokeTest` (`@DirtiesContext(BEFORE_CLASS)`), `@IntegrationTest` и `RestartableApp` дают разные контексты на одной БД; конфликта нет, `@DirtiesContext` сбрасывает только контекст своей конфигурации. Предел: `max_connections=300` у встроенного PostgreSQL, Hikari по умолчанию до 10 соединений на контекст, в кеше до 32 контекстов. Поэтому классы `@IntegrationTest` не вводят свои свойства и `@MockitoBean` без нужды.
 
 Профиль `test`: `nm.poll.enabled=false`, `nm.jobs.enabled=false`, `nm.traps.enabled=false`, `nm.seed.enabled=false`. Каждый тест включает нужное явно.
 

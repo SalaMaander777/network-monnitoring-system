@@ -103,16 +103,16 @@
 **Цель:** все межмодульные типы и интерфейсы §7 существуют и защищены тестом границ, чтобы дальше исполнители работали параллельно.
 **Исполнитель:** backend-core. **Зависит от:** T1.02.
 
-**Файлы:** `S/contract/*.java` (группируются вложенными record и enum по §7.1, допустимо до 25 небольших файлов без логики, это исключение правила о числе файлов), `S/contract/events/*.java`, `S/stream/SeqStreamPublisher.java`, `S/common/ClockConfig.java`, `T/testsupport/` (`IntegrationTest`, `TestDb`, `TestData`, `MutableClock`, `Api`, `LogCapture`, `RestartableApp`; правка `TestPostgres` по шагу 6), `T/ArchitectureTest.java`, `T/contract/ContractTypesTest.java`, `T/schema/SchemaConstraintsTest.java` (только шаг 7).
+**Файлы:** `S/contract/*.java` (46 файлов, по одному на тип верхнего уровня по правилам переноса §7.1, без логики; это исключение правила о числе файлов), `S/contract/events/*.java` (5 файлов, §7.2), `S/stream/SeqStreamPublisher.java`, `S/common/ClockConfig.java`, `T/testsupport/` (`IntegrationTest`, `TestDb`, `TestData`, `MutableClock`, `Api`, `LogCapture`, `RestartableApp`, `TestDbSelfTest`; правка `TestPostgres` по шагу 6), `server/src/test/resources/logback-test.xml` (§12.2, `LogCapture`), `T/ArchitectureTest.java`, `T/contract/ContractTypesTest.java`, `T/schema/SchemaConstraintsTest.java` (только шаг 7).
 
 **Контракты:** §2.2, §7.1, §7.2, §12.2, §14.
 
 **Шаги:**
-1. Перенести сигнатуры §7 без изменений.
+1. Перенести сигнатуры §7.1 и §7.2 (интерфейсы и события) без изменений, по правилам переноса §7.1. `ClockConfig` по §12.2 («Решения по помощникам»).
 2. Для `SnmpCredentials.V2c` и `V3` переопределить `toString`, значения заменяются на `***`.
 3. `SeqStreamPublisher`: возрастающий `seq`, `publish` ничего не отправляет. Реализует `StreamPublisher`.
-4. `ArchitectureTest` с правилами §2.2 пунктов 1, 2, 4. Правило 3 для контроллеров: пока контроллеров нет, правило активируется `allowEmptyShould(true)`.
-5. Помощники §12.2. `Api` использует `SecurityMockMvcRequestPostProcessors.user(...)` и `csrf()`. `RestartableApp` запускает реальный Tomcat на случайном порту.
+4. `ArchitectureTest` с правилами §2.2 пунктов 1–4 в формулировке §2.2 («Формулировка в `ArchitectureTest`»): пункты 1–3 как `@ArchTest`, пункт 4 как `@Test` в том же классе. Оба правила пункта 3 с `allowEmptyShould(true)`: контроллеров пока нет.
+5. Помощники по таблице и решениям §12.2, включая `logback-test.xml`. `Api` использует `SecurityMockMvcRequestPostProcessors.user(...)` и `csrf()`. `RestartableApp` запускает реальный Tomcat на случайном порту, свойства передаёт аргументами командной строки.
 6. В `T/testsupport/TestPostgres.java` добавить `public static Map<String,String> properties()` (пока только `spring.datasource.url/username/password`); `initialize` и `RestartableApp` передают свойства только из него (§12.2, «Каталог данных в тестах»). Других изменений `TestPostgres` нет.
 7. `SchemaConstraintsTest` (замечания ревью T1.02), других изменений нет:
    1. Заменить `@SpringBootTest`, `@ActiveProfiles`, `@ContextConfiguration` на `@IntegrationTest`: очистка `TestDb` перед каждым методом убирает зависимость от данных и настроек других классов. Запрет `@Transactional` сохраняется.
@@ -126,7 +126,7 @@
 - `ContractTypesTest`: порядок `DeviceStatus` = худший первым; `toString` секретных типов не содержит значения; `equals` и логирование через `String.valueOf` также не раскрывают значение.
 - `SchemaConstraintsTest`: зелёный после шага 7; в отчёте показать, что метод с `UPDATE` по несуществующему `id` падает на проверке числа строк, и удалить его.
 - `ArchitectureTest`: зелёный; в отчёте показать, что временное нарушение (класс `contract`, импортирующий Spring) ловится, и удалить его.
-- `TestDbSelfTest`: очистка удаляет данные и возвращает настройки к умолчанию (шесть пар после восстановления равны строкам `INSERT` §4.2, лишние ключи удаляются); `MutableClock.advance` работает; повторный `RestartableApp` видит те же данные.
+- `T/testsupport/TestDbSelfTest.java` (`@IntegrationTest`): очистка удаляет данные, в том числе строку `check_result_default` и пользователя, на которого ссылается `system_setting.updated_by`, и возвращает настройки к умолчанию (шесть пар после восстановления равны строкам `INSERT` §4.2, лишние ключи удаляются; то же для `restoreSettings()`); внедрённый `Clock` есть `MutableClock`, `advance` работает; `RestartableApp` слушает случайный порт (не 8080), после `restart()` видит те же данные, а `LogCapture` видит строку, записанную после `restart()` и после остановки.
 
 **Команда проверки:** `mvn -B -pl server -am test -Dtest='ContractTypesTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest,SmokeTest'`
 
