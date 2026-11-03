@@ -10,6 +10,8 @@
 
 **Постраничные ресурсы (с T1.04, круг 1 ревью):** `ORDER BY` строится только из `PageQuery.orderBy(tieBreaker)` с уникальным столбцом (`id`) и подставляется как есть, `LIMIT ?`/`OFFSET ?` параметрами из `size()` и `offset()`. Обязательный тест каждого постраничного эндпоинта: не меньше трёх записей с одинаковым значением поля сортировки, `size=1` (или меньше их числа), обход всех страниц даёт каждую запись ровно один раз; страница за последней 200 с пустым `items` и настоящим `total`.
 
+**Тела запросов и ограничения (с T1.05, повторное ревью T1.04 Н-а, Н-е):** тело `@RequestBody` верхнего уровня всегда объект JSON, не коллекция, не `Map` и не массив (§2.2 п. 5, проверяет `ArchitectureTest`); списки передаются полем объекта. Кросс-параметрическое ограничение метода контроллера допускается только с явным `message` на русском; его ошибка приходит с `field: null` (§5.1). Правки `ApiErrorHandler` после T1.04 делают только карточки, где это прямо записано (T1.05, T1.24).
+
 **Обозначение пути:** `S/` = `server/src/main/java/ru/netmon/`, `T/` = `server/src/test/java/ru/netmon/`, `R/` = `server/src/main/resources/`.
 
 ---
@@ -226,7 +228,7 @@
 **Цель:** без сессии недоступно ничего, кроме страницы входа; пользователь входит по логину и паролю из БД с BCrypt.
 **Исполнитель:** backend-core. **Зависит от:** T1.04.
 
-**Файлы:** `S/auth/SecurityConfig.java`, `AppUserRepository.java`, `AppUserDetailsService.java`, `JsonAuthHandlers.java`, `MeController.java`, `S/common/web/ApiErrorController.java`, `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `T/common/ErrorPageTest.java`, `server/src/test/java/nmtest/common/FailingFilter.java`, `server/src/test/resources/security-matrix/auth.csv`; временный `R/static/login.html` не создаётся, его делает T1.28.
+**Файлы:** `S/auth/SecurityConfig.java`, `AppUserRepository.java`, `AppUserDetailsService.java`, `JsonAuthHandlers.java`, `MeController.java`, `S/common/web/ApiErrorController.java`, `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `T/common/ErrorPageTest.java`, `server/src/test/java/nmtest/common/FailingFilter.java`, `server/src/test/resources/security-matrix/auth.csv`; по шагу 6: правка `S/common/web/ApiErrorHandler.java`, `T/ArchitectureTest.java`, `T/common/ApiErrorsTest.java`, новые `server/src/test/java/nmtest/common/ErrorsExtraTestController.java` и `nmtest/common/OrderedRange.java` (тестовое кросс-параметрическое ограничение с валидатором; `ErrorsTestController` и `ApiErrorsQaTest` не правятся); временный `R/static/login.html` не создаётся, его делает T1.28.
 
 **Контракты:** §5.1, §5.2 (auth, me), §12.3.
 
@@ -235,7 +237,8 @@
 2. `BCryptPasswordEncoder` стойкостью 10. `DaoAuthenticationProvider` с проверкой `active`.
 3. `GET /api/auth/csrf`, `GET /api/me`.
 4. Заполнить `auth.csv` эндпоинтами этой карточки.
-5. (из ревью T1.04, Н4) `ApiErrorController` по абзацу §5.1 под таблицей: реализует `ErrorController` Spring Boot (пакет интерфейса взять из версии Spring Boot §1, проверить по классам в `~/.m2`), один метод на `/error` для всех методов HTTP, ответ `ResponseEntity` JSON. Функция кода 4xx выносится из `ApiErrorHandler` в общую пакетную статическую функцию без изменения поведения. В `SecurityConfig` диспетчеризация `DispatcherType.ERROR` разрешена (`dispatcherTypeMatchers(ERROR).permitAll()`), иначе ответ `/error` снова проходит проверку сессии. Свойства `server.error.*` не задаются.
+5. (из ревью T1.04, Н4) `ApiErrorController` по абзацу §5.1 под таблицей: реализует `ErrorController` Spring Boot (пакет интерфейса взять из версии Spring Boot §1, проверить по классам в `~/.m2`), один метод на `/error` для всех методов HTTP, ответ `ResponseEntity` JSON. Функция кода 4xx выносится из `ApiErrorHandler` в общую пакетную статическую функцию без изменения поведения. В `SecurityConfig` диспетчеризация `DispatcherType.ERROR` разрешена (`dispatcherTypeMatchers(ERROR).permitAll()`), иначе ответ `/error` снова проходит проверку сессии. Свойства `server.error.*` не задаются. При `response.isCommitted()` (Tomcat делает `include` страницы ошибки в начатый ответ) `ApiErrorController` тело не пишет и в лог не пишет (§5.1, абзац под таблицей).
+6. (повторное ревью T1.04, Н-а, Н-д, Н-е, Н-ж) Доработка `ApiErrorHandler` и правил по §5.1 и §2.2: (а) правило §2.2 п. 5 в `ArchitectureTest` (тело верхнего уровня не коллекция); (б) для `ErrorResponse` 4xx заголовки `getHeaders()` копируются в ответ, кроме `Content-Type` и `Content-Length`; (в) `getCrossParameterValidationResults()` дают поля `field=null` с `getDefaultMessage()` после ошибок параметров. Остальное поведение `ApiErrorHandler` не меняется.
 
 **Обязательные тесты:**
 - AUTH-01: 401 на `/api/me` и любой другой путь `/api/**`; статический `/index.html` без сессии перенаправляется на вход; `/login.html` доступен (404 здесь не считается отказом доступа).
@@ -246,8 +249,9 @@
 - SEC-05 CSRF: POST без `X-XSRF-TOKEN` даёт 403; с верным токеном проходит; с чужим 403.
 - Пустой логин, логин 1000 символов: 401 без 500.
 - `ErrorPageTest` (Н4 ревью T1.04). `MockMvc` не выполняет переадресацию на `/error`, поэтому: (1) `GET /error` с атрибутами запроса `jakarta.servlet.error.status_code` = 500 и `jakarta.servlet.error.exception` = `IllegalStateException(<маркер>)` даёт 500 и тело ровно `{"code":"INTERNAL_ERROR","message":"Внутренняя ошибка сервера","fields":[]}`, маркер в логе есть, в теле нет; статус 404 даёт `NOT_FOUND`, 413 `PAYLOAD_TOO_LARGE`; (2) `RestartableApp` с `extraSources` `nmtest.common.FailingFilter` (`OncePerRequestFilter`, на пути `/api/test-filter-fail` бросает `IllegalStateException(<маркер>)`, иначе пропускает) и `java.net.http.HttpClient` на `http://127.0.0.1:<port>`: ответ 500, тело по §5.1 `INTERNAL_ERROR`, без маркера и без `timestamp`, `trace`, `exception`.
+- Шаг 6 (`ApiErrorsTest`, `ErrorsExtraTestController` на путях `/api/test-errors-extra/**`): 405 (`DELETE` на путь только с `GET`) несёт `Allow` со значением `GET` (и `HEAD`, если Spring его добавит; сверять, что `GET` есть, а `DELETE` нет), тело `METHOD_NOT_ALLOWED`; 415 (`POST` с `text/plain` на метод с `consumes = application/json`) несёт `Accept`, содержащий `application/json`, тело `UNSUPPORTED_MEDIA_TYPE`; `Content-Type` ответа в обоих случаях `application/json`. Кросс-параметрическое ограничение `@OrderedRange` (`from <= to` для двух `@RequestParam int`, `message` «Начало диапазона больше конца»): `from=5&to=1` даёт 400 `VALIDATION_FAILED`, `fields` ровно `[{"field":null,"message":"Начало диапазона больше конца"}]`; вместе с нарушением ограничения параметра (`@Min(0)` на `from`, `from=-1&to=-2`) поле параметра идёт первым. `ArchitectureTest`: правило п. 5 ловит нарушение на тестовом наборе классов (`ClassFileImporter` по классу-нарушителю в `nmtest`, метод `@PostMapping` с `@RequestBody List<String>`), на `ru.netmon` проходит. `pageLimits` дополняется `size=%205` (пробел, закодированный в URL) даёт 400 с полем `size` (ревью T1.04 Н-ж; разбор тот же, что у `page=%205`).
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginTest,CsrfTest,ErrorPageTest,ApiErrorsTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginTest,CsrfTest,ErrorPageTest,ApiErrorsTest,ApiErrorsQaTest,ArchitectureTest'`
 
 **Критерии готовности:** тесты зелёные; `SecurityConfig` не содержит правил по отдельным ресурсам; в логах нет сгенерированного пароля Spring.
 
@@ -771,11 +775,13 @@
 **Цель:** подключённый браузер получает события после фиксации транзакции, а поток не вредит серверу при разрывах и истечении сессии.
 **Исполнитель:** backend-core. **Зависит от:** T1.08.
 
-**Файлы:** `S/stream/StreamController.java`, `StreamHub.java`, `StreamClient.java`, замена `SeqStreamPublisher.java` на `TransactionalStreamPublisher.java`, `T/stream/StreamHubTest.java`, `T/stream/StreamHttpTest.java`, `security-matrix/stream.csv`.
+**Файлы:** `S/stream/StreamController.java`, `StreamHub.java`, `StreamClient.java`, замена `SeqStreamPublisher.java` на `TransactionalStreamPublisher.java`, `T/stream/StreamHubTest.java`, `T/stream/StreamHttpTest.java`, `security-matrix/stream.csv`; по шагу «Начатый ответ»: правка `S/common/web/ApiErrorHandler.java`, новые `T/common/CommittedResponseTest.java`, `server/src/test/java/nmtest/common/CommittedErrorsTestController.java`.
 
-**Контракты:** §6, §7.2 (`StreamPublisher`).
+**Контракты:** §6, §7.2 (`StreamPublisher`), §5.1 (строки таблицы `ApiErrorHandler` с пометкой «с T1.24»).
 
 **Шаги:** `SseEmitter` с собственной ограниченной очередью и отправляющим потоком на клиента, без блокировки издателя. Heartbeat 15 с с проверкой сессии (доступ к объекту `HttpSession`, переданному при подключении). Период heartbeat настраивается для теста.
+
+**Шаг «Начатый ответ» (повторное ревью T1.04, Н-б, Н-в, Н-г; делается до задачи 7):** `ApiErrorHandler` по строкам §5.1 с пометкой «с T1.24»: (1) `AsyncRequestNotUsableException` ищется и в цепочке `getCause()` тем же обходом, что исключения безопасности (не глубже 20 звеньев, без зацикливания), в том числе при неначатом ответе; (2) при `isCommitted()` обрыв клиента (`AsyncRequestTimeoutException`; в цепочке `org.apache.catalina.connector.ClientAbortException` или `AsyncRequestNotUsableException`) даёт `DEBUG` и `return null`; (3) иное при `isCommitted()`, включая серверное `IOException`, даёт `ERROR` со стеком и `throw e`. Порядок проверок §5.1 сохраняется.
 
 **Обязательные тесты:**
 - `hello` при подключении, `heartbeat` по таймеру; `seq` строго возрастает.
@@ -784,13 +790,14 @@
 - Пятый поток одной сессии закрывает старейший; поток другой сессии не затронут.
 - Разрыв клиента: ресурс освобождён, подсчёт активных потоков возвращается к нулю; ошибок уровня ERROR в логе нет.
 - (из ревью T1.04, Н1) `SseEmitter` создаётся с явным таймаутом (`0L`, без истечения: поток закрывают heartbeat с проверкой сессии и пределы §6), `onTimeout`, `onError` и `onCompletion` снимают клиента; ошибка записи в отправляющем потоке закрывает клиента через `completeWithError` или `complete` без `ERROR` в логе. `ApiErrorHandler` для начатого ответа JSON не пишет (§5.1); тест: после разрыва и после закрытия по переполнению в `LogCapture` нет пути `/api/stream` на уровне `ERROR` и нет `text/event-stream`-ответа с JSON ошибки.
+- `CommittedResponseTest` (шаг «Начатый ответ»; `RestartableApp` с `extraSources` `nmtest.common.CommittedErrorsTestController`, `java.net.http.HttpClient` на `http://127.0.0.1:<port>`, пути `/api/test-committed/**`, запросы с сессией после входа по T1.05): (а) метод пишет 64 КиБ `application/octet-stream`, делает `flushBuffer()` и бросает `IllegalStateException(<маркер>)`: чтение тела клиентом завершается `IOException` (ответ не завершён штатно), в прочитанных байтах нет `"code"`, в `LogCapture` `ERROR` с маркером; (б) то же с `new IOException(<маркер>)` (серверное, не `ClientAbortException`): тоже обрыв у клиента и `ERROR`; (в) клиент закрывает соединение посреди длинного ответа: в логе нет `ERROR` по этому пути; (г) неначатый ответ, метод бросает `IllegalStateException(new AsyncRequestNotUsableException(<маркер>))`: нет `ERROR`, нет JSON `INTERNAL_ERROR` в теле. Если (а) или (б) на Tomcat версии §1 не дают обрыва у клиента, тест не ослабляется: остановиться и сообщить в отчёте (тогда решение меняет architect, вариант буферизации выгрузки).
 - Медленный клиент: очередь 1000 переполнена, поток закрыт, издатель не задержан (ограничение по времени на 100 000 публикаций), другие клиенты получили всё.
 - Истечение сессии закрывает поток за один период heartbeat; повторное подключение 401.
 - `terminateAll` закрывает поток за один период.
 - Поток не продлевает сессию.
 - Остановка приложения завершается за ограниченное время при открытых потоках.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='StreamHubTest,StreamHttpTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='StreamHubTest,StreamHttpTest,CommittedResponseTest,ApiErrorsTest,ApiErrorsQaTest,ArchitectureTest'`
 
 **Критерии готовности:** тесты зелёные, повтор 3 раза без сбоев (в отчёте). Браузерная часть MAP-03 и MAP-04: T2.05, T2.06.
 
