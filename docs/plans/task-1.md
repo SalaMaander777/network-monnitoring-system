@@ -8,6 +8,8 @@
 
 **Готово значит:** команда проверки карточки завершается успешно, в отчёте перечислено непроверенное. С T1.03 команда включает `ArchitectureTest`.
 
+**Постраничные ресурсы (с T1.04, круг 1 ревью):** `ORDER BY` строится только из `PageQuery.orderBy(tieBreaker)` с уникальным столбцом (`id`) и подставляется как есть, `LIMIT ?`/`OFFSET ?` параметрами из `size()` и `offset()`. Обязательный тест каждого постраничного эндпоинта: не меньше трёх записей с одинаковым значением поля сортировки, `size=1` (или меньше их числа), обход всех страниц даёт каждую запись ровно один раз; страница за последней 200 с пустым `items` и настоящим `total`.
+
 **Обозначение пути:** `S/` = `server/src/main/java/ru/netmon/`, `T/` = `server/src/test/java/ru/netmon/`, `R/` = `server/src/main/resources/`.
 
 ---
@@ -154,7 +156,7 @@
 
 **Шаги:**
 1. `FieldError`, `ApiException`, `PageQuery`, `PageResponse` по §5.1 буквально (сигнатуры, коды, тексты сообщений).
-2. `ApiErrorHandler` по таблице §5.1: по методу `@ExceptionHandler` на каждую строку, кроме двух последних; последние две и проброс `AccessDeniedException`/`AuthenticationException` в одном методе `@ExceptionHandler(Exception.class)` (`throws Exception`). Тело собирается в `LinkedHashMap` (`code`, `message`, `fields`, затем `details`), ответ `ResponseEntity` с `MediaType.APPLICATION_JSON`.
+2. `ApiErrorHandler` по таблице §5.1 (с круга 1 ревью: разбор `ParameterErrors`, цепочка причин исключений безопасности, начатый ответ, `AsyncRequestNotUsableException`, `AsyncRequestTimeoutException`, постоянная таблица кодов 4xx, `WARN` у `DATA_CONFLICT`; порядок проверок по абзацу под таблицей): по методу `@ExceptionHandler` на каждую строку, кроме двух последних; последние две и проброс `AccessDeniedException`/`AuthenticationException` в одном методе `@ExceptionHandler(Exception.class)` (`throws Exception`). Тело собирается в `LinkedHashMap` (`code`, `message`, `fields`, затем `details`), ответ `ResponseEntity` с `MediaType.APPLICATION_JSON`.
 3. `ErrorsTestController` (`@RestController`, `@RequestMapping("/api/test-errors")`, каждый метод с `@PreAuthorize("permitAll()")`), конечные точки:
    - `POST /body`: `@Valid @RequestBody Body` (вложенный `record Body(@NotBlank(message = "Название обязательно") String name, @Min(value = 1, message = "Не меньше 1") int n)`), возвращает тело;
    - `GET /typed?n=`: `@RequestParam long n`;
@@ -164,8 +166,16 @@
    - `GET /db`: `throw new DataIntegrityViolationException(...)` с текстом, содержащим маркер `ux_marker_db` и слово `insert`;
    - `GET /boom?m=`: `throw new IllegalStateException(m)`;
    - `GET /denied`: `throw new AccessDeniedException("denied")`;
-   - `GET /page?page=&size=&sort=`: три параметра `@RequestParam(required = false) String`, `PageQuery.parse(page, size, sort, Map.of("name", "name", "createdAt", "created_at"), "name,asc")`, ответ `PageResponse.of(List.of(q.orderBy()), q, 0)`.
-4. `ApiErrorsTest`: `@IntegrationTest` и `@Import(ErrorsTestController.class)` (сливается с `@Import` мета-аннотации, проверено прототипом); `LogCapture` через `@RegisterExtension`; все запросы через `Api` (`api.as(Role.OPERATOR)`), без своих свойств и `@MockitoBean`. Тело читать `getContentAsString(StandardCharsets.UTF_8)` или `jsonPath`: без `charset` в ответе `getContentAsString()` декодирует ISO-8859-1 и портит русский текст.
+   - `GET /page?page=&size=&sort=`: три параметра `@RequestParam(required = false) String`, `PageQuery.parse(page, size, sort, Map.of("name", "name", "createdAt", "created_at"), "name,asc")`, ответ `PageResponse.of(List.of(q.orderBy("id")), q, 0)`;
+   - (круг 1 ревью) `POST /mixed/{id}`: `@PathVariable @Min(value = 1, message = "Не меньше 1") long id`, `@Valid @RequestBody Mixed m`, где `record Mixed(@NotBlank(message = "Название обязательно") String name, @Valid List<Item> checks)`, `record Item(@Min(value = 1, message = "Не меньше 1") int port)`; возвращает `m`. Ограничение на параметре включает проверку метода, и тело приходит в `HandlerMethodValidationException`;
+   - `GET /denied-wrapped`: `throw new RuntimeException(new AccessDeniedException("denied"))`;
+   - `GET /status?s=`: `@RequestParam int s`, `throw new ResponseStatusException(HttpStatusCode.valueOf(s))`;
+   - `GET /fatal`: `throw new StackOverflowError("fatal")` (настоящее переполнение не вызывать);
+   - `GET /gone`: `throw new AsyncRequestNotUsableException("gone")`;
+   - `GET /async-timeout`: `throw new AsyncRequestTimeoutException()`;
+   - `GET /committed?m=`: параметр `HttpServletResponse r`; `r.setContentType("text/event-stream")`, `r.getWriter().write("data: x\n\n")`, `r.flushBuffer()`, затем `throw new IllegalStateException(m)`;
+   - `GET /committed-abort`: то же начало ответа, затем `throw new UncheckedIOException(new IOException("abort"))`.
+4. `ApiErrorsTest`: `@IntegrationTest` и `@Import(ErrorsTestController.class)` (сливается с `@Import` мета-аннотации, проверено прототипом); `LogCapture` через `@RegisterExtension`; все запросы через `Api` (`api.as(Role.OPERATOR)`), кроме запроса 415 в `springErrors`, без своих свойств и `@MockitoBean`. Тело читать `getContentAsString(StandardCharsets.UTF_8)` или `jsonPath`: без `charset` в ответе `getContentAsString()` декодирует ISO-8859-1 и портит русский текст.
 
 **Безопасность до T1.05.** `SecurityConfig` нет, действует цепочка Spring Boot по умолчанию (`anyRequest().authenticated()`, CSRF включён; пользователь по умолчанию исключён в `NetMonitoringApplication`). Без пользователя ответ 401 с пустым телом, `POST` без CSRF 403 с пустым телом (проверено прототипом). `Api` ставит `user(...)` и `csrf()`, поэтому запросы теста доходят до контроллера. `@EnableMethodSecurity` не вводится (это `SecurityConfig` T1.05): до T1.05 `@PreAuthorize` не действует, `permitAll()` в тестовом контроллере нужен, чтобы тест не сломался после T1.05. `ArchitectureTest` п. 3 тестовый контроллер не проверяет (импорт только `ru.netmon` без тестов), `ApiErrorHandler` не мета-аннотирован `@Controller`; изменений `ArchitectureTest` нет. Тесты 401/403/CSRF в T1.04 не пишутся, кроме `accessDeniedGoesToSecurity`.
 
@@ -176,33 +186,38 @@
 4. `TestDb`: пакетный метод `List<String> truncateTargets()` с запросом `select format('public.%I', relname) from pg_class where …` (прежние условия, `order by relname`); `clean()` вызывает его внутри своей транзакции вместо `quote_ident(relname)`. Новый метод `TestDbSelfTest.truncateTargetsQualified`: каждое имя начинается с `public.`; есть `public.check_result` и `public.system_setting`; нет `public.check_result_default` и `public.flyway_schema_history`.
 5. `LogCapture`: код не меняется; ограничения записаны в §12.2, `ApiErrorsTest` проверяет только свои уникальные строки.
 6. Напоминание (снимок настроек держится на соглашении §12.2): ни `RestartableApp`, ни тест вне `@IntegrationTest` не меняют `system_setting` до первого `@IntegrationTest` в JVM. `ApiErrorsTest` настроек не меняет. Карточки, вводящие изменение настроек (T1.07 и далее), помечают такие тесты `@IntegrationTest` и вызывают `restoreSettings()` в `@AfterEach`.
+7. (круг 1 ревью) `cleanFailsFastOnLockedTable`, блок `finally`: два независимых шага очистки, каждый в своём `try`/`catch (Throwable)`: (а) `rollback()` (при флаге) с `close()` в вложенном `finally`; (б) `pool.shutdown()` и `awaitTermination(30, SECONDS)`, при `false` `IllegalStateException`. Шаг (б) выполняется и при исключении шага (а). Первое исключение очистки запоминается, следующее добавляется к нему `addSuppressed`; затем при летящем исключении теста очистка добавляется к нему `addSuppressed`, иначе бросается. Сигнатура метода может стать `throws Throwable`.
 
 **Обязательные тесты (имена методов обязательны):**
 - `ApiErrorsTest.notFoundFormat`: `/not-found` 404, тело ровно `{"code":"NOT_FOUND","message":"Объект не найден","fields":[]}`.
 - `ApiErrorsTest.conflictWithDetails`: `/conflict` 409, `code`, `message`, `fields` пустой, `devices[0].id` = 1.
 - `ApiErrorsTest.validationFields`: `POST /body` с `{"name":"","n":0}` 400 `VALIDATION_FAILED`, `fields` содержит `name` «Название обязательно» и `n` «Не меньше 1»; `GET /checked?n=0` 400 `VALIDATION_FAILED` с полем `n`.
+- `ApiErrorsTest.mixedMethodValidationFieldPaths` (круг 1): `POST /mixed/0` с `{"name":"","checks":[{"port":1},{"port":0}]}` 400 `VALIDATION_FAILED`, `fields` ровно три элемента в любом порядке: `id`, `name` «Название обязательно», `checks[1].port` «Не меньше 1»; поля `m` нет. `POST /mixed/5` с тем же телом: два поля `name` и `checks[1].port`.
 - `ApiErrorsTest.badJson`: `POST /body` с `{"name":` и с `{"name":"x","n":"abc"}` 400 `BAD_JSON`; тело без `Exception`, `jackson`, `java.`, `ru.netmon`.
 - `ApiErrorsTest.typeMismatch`: `/typed?n=abc` 400 `BAD_PARAMETER`, поле `n`; тело без `NumberFormat`, `java.` и `abc`.
-- `ApiErrorsTest.springErrors`: `GET /api/test-errors/no-such-path` 404 `NOT_FOUND`; `POST /typed` 405 `METHOD_NOT_ALLOWED`; оба с `fields` `[]`.
-- `ApiErrorsTest.dataIntegrity`: `/db` 409 `DATA_CONFLICT`; тело без `ux_marker_db` и `insert`.
-- `ApiErrorsTest.unexpected500`: `/boom?m=<уникальный маркер>` 500 `INTERNAL_ERROR` «Внутренняя ошибка сервера»; тело без маркера, `IllegalState`, `Exception`, `at `; `logs.text()` содержит маркер.
-- `ApiErrorsTest.accessDeniedGoesToSecurity`: `/denied` 403 (ответ фильтра безопасности), тело не содержит `INTERNAL_ERROR`.
-- `ApiErrorsTest.pageLimits`: `size` `0`, `501`, `-1`, `abc`, пустой и `page=-1`, `page=abc` дают 400 `VALIDATION_FAILED` с полем `size` или `page`; `size=500` 200 и `"size":500`; без параметров 200 `{"items":["name asc"],"page":0,"size":50,"total":0}`; `page=2147483647&size=500` 200.
-- `ApiErrorsTest.sortWhitelist`: `sort=foo`, `sort=name;drop table device`, `sort=name,ASC`, `sort=name,asc,x`, `sort=name&sort=createdAt` дают 400 с полем `sort`; `sort=createdAt,desc` даёт `items[0]` = `created_at desc`, `sort=name` даёт `name asc`.
-- `PageQueryTest` (без Spring): умолчания; `offset()` при `page=Integer.MAX_VALUE`, `size=500` равен `2147483647L * 500` без переполнения; `page=-1&size=0&sort=foo` дают одну `ApiException` с тремя полями; `+5` и ` 5` неверны; неверный `defaultSort` даёт `IllegalArgumentException` и при заданном верном `sort` (`defaultSort` проверяется всегда, §5.1); `null` в `defaultSort` не тестируется (§5.1); `ApiException` с ключом `code` в `details` даёт `IllegalArgumentException`.
+- `ApiErrorsTest.springErrors`: `GET /api/test-errors/no-such-path` 404 `NOT_FOUND`; `POST /typed` 405 `METHOD_NOT_ALLOWED`; `POST /body` с `Content-Type: text/plain` 415 `UNSUPPORTED_MEDIA_TYPE`; все с `fields` `[]`. `Api` шлёт только JSON, поэтому запрос 415 идёт через бин `MockMvc` напрямую с `user(...)` и `csrf()`; `Api` не меняется.
+- `ApiErrorsTest.stableStatusCodes` (круг 1): `/status?s=413` 413 `PAYLOAD_TOO_LARGE`, `s=422` 422 `HTTP_422`, `s=418` 418 `HTTP_418`, `s=406` 406 `NOT_ACCEPTABLE`, `s=503` 500 `INTERNAL_ERROR`.
+- `ApiErrorsTest.dataIntegrity`: `/db` 409 `DATA_CONFLICT`; тело без `ux_marker_db` и `insert`; `logs.text()` содержит `Нарушение ограничения БД` и `/api/test-errors/db`, не содержит `ux_marker_db`.
+- `ApiErrorsTest.unexpected500`: `/boom?m=<маркер 1>&q=<маркер 2>` (оба уникальны, `q` контроллер не читает) 500 `INTERNAL_ERROR` «Внутренняя ошибка сервера»; тело без обоих маркеров, `IllegalState`, `Exception`, `at `; `logs.text()` содержит маркер 1 и `/api/test-errors/boom`, не содержит маркер 2 (строка запроса в лог не попадает).
+- `ApiErrorsTest.fatalErrorIs500` (круг 1): `/fatal` 500, тело ровно `{"code":"INTERNAL_ERROR","message":"Внутренняя ошибка сервера","fields":[]}`.
+- `ApiErrorsTest.accessDeniedGoesToSecurity`: `/denied` и `/denied-wrapped` 403 (ответ фильтра безопасности), тело не содержит `INTERNAL_ERROR`.
+- `ApiErrorsTest.clientGoneAndCommitted` (круг 1; `DEBUG` при уровнях `logback-test.xml` не пишется, поэтому «нет в логе» проверяется по пути): `/gone` тело ответа пустое, `logs.text()` не содержит `/api/test-errors/gone`; `/async-timeout` 503 `SERVICE_UNAVAILABLE` «Сервис временно недоступен», `fields` `[]`, лог не содержит `/api/test-errors/async-timeout`; `/committed?m=<маркер>` тело ответа ровно `data: x\n\n` (JSON не дописан), `logs.text()` содержит маркер; `/committed-abort` тело ровно `data: x\n\n`, лог не содержит `/api/test-errors/committed-abort`.
+- `ApiErrorsTest.pageLimits`: `size` `0`, `501`, `-1`, `abc`, пустой и `page=-1`, `page=abc` дают 400 `VALIDATION_FAILED` с полем `size` или `page`; `size=500` 200 и `"size":500`; без параметров 200 `{"items":["name asc, id asc"],"page":0,"size":50,"total":0}`; `page=2147483647&size=500` 200.
+- `ApiErrorsTest.sortWhitelist`: `sort=foo`, `sort=name;drop table device`, `sort=name,ASC`, `sort=name,asc,x`, `sort=name&sort=createdAt` дают 400 с полем `sort`; `sort=createdAt,desc` даёт `items[0]` = `created_at desc, id desc`, `sort=name` даёт `name asc, id asc`.
+- `PageQueryTest` (без Spring): умолчания; `orderBy("id")` = `name asc, id asc` и `created_at desc, id desc`; `orderBy("name")` при сортировке по `name` = `name asc` (без повтора); `PageQuery.class.getConstructors()` пуст, класс `final` и не `record` (метод `noPublicConstructor`); `offset()` при `page=Integer.MAX_VALUE`, `size=500` равен `2147483647L * 500` без переполнения; `page=-1&size=0&sort=foo` дают одну `ApiException` с тремя полями; `+5` и ` 5` неверны; неверный `defaultSort` даёт `IllegalArgumentException` и при заданном верном `sort` (`defaultSort` проверяется всегда, §5.1); `null` в `defaultSort` не тестируется (§5.1); `ApiException` с ключом `code` в `details` даёт `IllegalArgumentException`.
 - `ApiErrorsQaTest` (добавлен qa-verifier как независимая проверка; тот же `@IntegrationTest` и `@Import(ErrorsTestController.class)`, без изменений тестового контроллера). Закрывает то, чего нет в `ApiErrorsTest`:
   - `literalMessagesAndContentType`: буквальные тела по таблице §5.1: `VALIDATION_FAILED` «Проверьте введённые данные» для `POST /body` и `GET /checked` (начало тела, `fields` массив); целиком `BAD_JSON`, `BAD_PARAMETER` (с полем `n` «Неверное значение»), `DATA_CONFLICT`, `INTERNAL_ERROR`, Spring 404 `NOT_FOUND` и 405 `METHOD_NOT_ALLOWED` с «Запрос не может быть выполнен»; порядок `code`, `message`, `fields`, затем `devices` у `PROFILE_IN_USE`; `Content-Type` начинается с `application/json`.
   - `missingBodyAndMissingParam`: `POST /body` без тела 400 `BAD_JSON`; `GET /typed` без `n` 400 `BAD_REQUEST` (строка `ErrorResponse` 4xx) с пустым `fields`.
   - `leakFreeValidation`: `sort=<маркер>` 400 `VALIDATION_FAILED` «Проверьте параметры запроса», поле «Недопустимая сортировка»; в теле нет маркера, выражения SQL `created_at`, неверного направления `bad`, значения `foo`; `page=-1&size=0&sort=foo` даёт три поля.
   - `strictParsingOverHttp`: через HTTP 400 для `+5` и ` 5` в `page`/`size`, пустых `page`, `size`, `sort`, `name,`, `,asc`, `Name`, `name,desc,`, `name ` (с пробелом), `0500x`, `page=99999999999`, повторов `sort` и `page`; `sort=name,asc` 200.
-  - `pageBeyondLastIsOkAndEmptyItemsContract`: `page=1000&size=10` 200, `page` 1000, `size` 10, `total` 0 (содержимое `items` не проверяет: тестовый контроллер возвращает `orderBy()`).
-- `TestDbSelfTest`: зелёный с проверками шагов помощников 1–4 (`cleanFailsFastOnLockedTable`, `clockZoneEquality`, `truncateTargetsQualified`); в отчёте показать, что при временно выключенном `lock_timeout` (`set local lock_timeout = 0` в `clean()`) метод `cleanFailsFastOnLockedTable` падает с `TimeoutException` примерно за 30 с и прогон завершается, затем вернуть `'5s'`.
+  - `pageBeyondLastIsOk` (переименован в круге 1 из `pageBeyondLastIsOkAndEmptyItemsContract`: имя обещало проверку `items`, которой нет): `page=1000&size=10` 200, `page` 1000, `size` 10, `total` 0 (содержимое `items` не проверяет: тестовый контроллер возвращает `orderBy("id")`; пустой `items` за последней страницей проверяют ресурсы, «Правила для всех карточек»).
+- `TestDbSelfTest`: зелёный с проверками шагов помощников 1–4 и 7 (`cleanFailsFastOnLockedTable`, `clockZoneEquality`, `truncateTargetsQualified`); в отчёте показать, что при временно выключенном `lock_timeout` (`set local lock_timeout = 0` в `clean()`) метод `cleanFailsFastOnLockedTable` падает с `TimeoutException` примерно за 30 с и прогон завершается, затем вернуть `'5s'`.
 
 **Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,ApiErrorsQaTest,PageQueryTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest'`
 
 **Критерии готовности:** всё зелёное, тело ошибки соответствует примеру и таблице §5.1.
 
-**Запрещено:** логика конкретных ресурсов; `SecurityConfig` и `@EnableMethodSecurity` (T1.05); изменения `ArchitectureTest`.
+**Запрещено:** логика конкретных ресурсов; `SecurityConfig` и `@EnableMethodSecurity` (T1.05); изменения `ArchitectureTest`; `ErrorController` для `/error` (T1.05).
 
 ---
 
@@ -211,7 +226,7 @@
 **Цель:** без сессии недоступно ничего, кроме страницы входа; пользователь входит по логину и паролю из БД с BCrypt.
 **Исполнитель:** backend-core. **Зависит от:** T1.04.
 
-**Файлы:** `S/auth/SecurityConfig.java`, `AppUserRepository.java`, `AppUserDetailsService.java`, `JsonAuthHandlers.java`, `MeController.java`, `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `server/src/test/resources/security-matrix/auth.csv`; временный `R/static/login.html` не создаётся, его делает T1.28.
+**Файлы:** `S/auth/SecurityConfig.java`, `AppUserRepository.java`, `AppUserDetailsService.java`, `JsonAuthHandlers.java`, `MeController.java`, `S/common/web/ApiErrorController.java`, `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `T/common/ErrorPageTest.java`, `server/src/test/java/nmtest/common/FailingFilter.java`, `server/src/test/resources/security-matrix/auth.csv`; временный `R/static/login.html` не создаётся, его делает T1.28.
 
 **Контракты:** §5.1, §5.2 (auth, me), §12.3.
 
@@ -220,6 +235,7 @@
 2. `BCryptPasswordEncoder` стойкостью 10. `DaoAuthenticationProvider` с проверкой `active`.
 3. `GET /api/auth/csrf`, `GET /api/me`.
 4. Заполнить `auth.csv` эндпоинтами этой карточки.
+5. (из ревью T1.04, Н4) `ApiErrorController` по абзацу §5.1 под таблицей: реализует `ErrorController` Spring Boot (пакет интерфейса взять из версии Spring Boot §1, проверить по классам в `~/.m2`), один метод на `/error` для всех методов HTTP, ответ `ResponseEntity` JSON. Функция кода 4xx выносится из `ApiErrorHandler` в общую пакетную статическую функцию без изменения поведения. В `SecurityConfig` диспетчеризация `DispatcherType.ERROR` разрешена (`dispatcherTypeMatchers(ERROR).permitAll()`), иначе ответ `/error` снова проходит проверку сессии. Свойства `server.error.*` не задаются.
 
 **Обязательные тесты:**
 - AUTH-01: 401 на `/api/me` и любой другой путь `/api/**`; статический `/index.html` без сессии перенаправляется на вход; `/login.html` доступен (404 здесь не считается отказом доступа).
@@ -229,8 +245,9 @@
 - Сессия меняется при входе (защита от фиксации).
 - SEC-05 CSRF: POST без `X-XSRF-TOKEN` даёт 403; с верным токеном проходит; с чужим 403.
 - Пустой логин, логин 1000 символов: 401 без 500.
+- `ErrorPageTest` (Н4 ревью T1.04). `MockMvc` не выполняет переадресацию на `/error`, поэтому: (1) `GET /error` с атрибутами запроса `jakarta.servlet.error.status_code` = 500 и `jakarta.servlet.error.exception` = `IllegalStateException(<маркер>)` даёт 500 и тело ровно `{"code":"INTERNAL_ERROR","message":"Внутренняя ошибка сервера","fields":[]}`, маркер в логе есть, в теле нет; статус 404 даёт `NOT_FOUND`, 413 `PAYLOAD_TOO_LARGE`; (2) `RestartableApp` с `extraSources` `nmtest.common.FailingFilter` (`OncePerRequestFilter`, на пути `/api/test-filter-fail` бросает `IllegalStateException(<маркер>)`, иначе пропускает) и `java.net.http.HttpClient` на `http://127.0.0.1:<port>`: ответ 500, тело по §5.1 `INTERNAL_ERROR`, без маркера и без `timestamp`, `trace`, `exception`.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginTest,CsrfTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginTest,CsrfTest,ErrorPageTest,ApiErrorsTest,ArchitectureTest'`
 
 **Критерии готовности:** тесты зелёные; `SecurityConfig` не содержит правил по отдельным ресурсам; в логах нет сгенерированного пароля Spring.
 
@@ -766,6 +783,7 @@
 - Без сессии 401; дежурный и администратор подключаются.
 - Пятый поток одной сессии закрывает старейший; поток другой сессии не затронут.
 - Разрыв клиента: ресурс освобождён, подсчёт активных потоков возвращается к нулю; ошибок уровня ERROR в логе нет.
+- (из ревью T1.04, Н1) `SseEmitter` создаётся с явным таймаутом (`0L`, без истечения: поток закрывают heartbeat с проверкой сессии и пределы §6), `onTimeout`, `onError` и `onCompletion` снимают клиента; ошибка записи в отправляющем потоке закрывает клиента через `completeWithError` или `complete` без `ERROR` в логе. `ApiErrorHandler` для начатого ответа JSON не пишет (§5.1); тест: после разрыва и после закрытия по переполнению в `LogCapture` нет пути `/api/stream` на уровне `ERROR` и нет `text/event-stream`-ответа с JSON ошибки.
 - Медленный клиент: очередь 1000 переполнена, поток закрыт, издатель не задержан (ограничение по времени на 100 000 публикаций), другие клиенты получили всё.
 - Истечение сессии закрывает поток за один период heartbeat; повторное подключение 401.
 - `terminateAll` закрывает поток за один период.
