@@ -145,36 +145,58 @@
 
 ## T1.04. Ошибки API и постраничность
 
-**Цель:** все ошибки и постраничные ответы API имеют единый формат без утечки внутренностей.
+**Цель:** все ошибки и постраничные ответы API имеют единый формат без утечки внутренностей (основа DEV-03 «понятное сообщение» и DEV-05 «постраничный вывод, сортировка»).
 **Исполнитель:** backend-core. **Зависит от:** T1.03.
 
-**Файлы:** `S/common/web/ApiException.java`, `FieldError.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`, `T/common/ApiErrorsTest.java`, `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, подключается к `ApiErrorsTest` через `@Import`, §12.2 «Тестовые контроллеры и бины»; пути под `/api/test-errors/`, методы с `@PreAuthorize("permitAll()")`); по шагам «Тестовые помощники» (неблокирующие замечания ревью T1.03): `T/testsupport/TestDb.java`, `T/testsupport/MutableClock.java`, `T/testsupport/TestDbSelfTest.java`.
+**Файлы:** `S/common/web/FieldError.java`, `ApiException.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`; `T/common/ApiErrorsTest.java`, `T/common/PageQueryTest.java`; `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, §12.2 «Тестовые контроллеры и бины»); по шагам «Тестовые помощники»: `T/testsupport/TestDb.java`, `T/testsupport/MutableClock.java`, `T/testsupport/TestDbSelfTest.java`.
 
-**Контракты:** §5.1; для шагов помощников §12.2, §14.
+**Контракты:** §5.1 (в том числе «Реализация в `ru.netmon.common.web`»), §2.2, §12.2, §14.
 
-**Шаги:** обработчик `@RestControllerAdvice` для `ApiException`, ошибок разбора JSON, проверки Bean Validation, неверного типа параметра, нарушения ограничения БД, неожиданного исключения. `PageQuery.parse(page,size,sort,разрешённые)`.
+**Шаги:**
+1. `FieldError`, `ApiException`, `PageQuery`, `PageResponse` по §5.1 буквально (сигнатуры, коды, тексты сообщений).
+2. `ApiErrorHandler` по таблице §5.1: по методу `@ExceptionHandler` на каждую строку, кроме двух последних; последние две и проброс `AccessDeniedException`/`AuthenticationException` в одном методе `@ExceptionHandler(Exception.class)` (`throws Exception`). Тело собирается в `LinkedHashMap` (`code`, `message`, `fields`, затем `details`), ответ `ResponseEntity` с `MediaType.APPLICATION_JSON`.
+3. `ErrorsTestController` (`@RestController`, `@RequestMapping("/api/test-errors")`, каждый метод с `@PreAuthorize("permitAll()")`), конечные точки:
+   - `POST /body`: `@Valid @RequestBody Body` (вложенный `record Body(@NotBlank(message = "Название обязательно") String name, @Min(value = 1, message = "Не меньше 1") int n)`), возвращает тело;
+   - `GET /typed?n=`: `@RequestParam long n`;
+   - `GET /checked?n=`: `@RequestParam @Min(value = 1, message = "Не меньше 1") int n` (встроенная проверка метода Spring MVC, `HandlerMethodValidationException`);
+   - `GET /not-found`: `throw ApiException.notFound()`;
+   - `GET /conflict`: `ApiException` 409 `PROFILE_IN_USE` «Профиль используется» с `details` `{"devices":[{"id":1,"name":"d"}]}`;
+   - `GET /db`: `throw new DataIntegrityViolationException(...)` с текстом, содержащим маркер `ux_marker_db` и слово `insert`;
+   - `GET /boom?m=`: `throw new IllegalStateException(m)`;
+   - `GET /denied`: `throw new AccessDeniedException("denied")`;
+   - `GET /page?page=&size=&sort=`: три параметра `@RequestParam(required = false) String`, `PageQuery.parse(page, size, sort, Map.of("name", "name", "createdAt", "created_at"), "name,asc")`, ответ `PageResponse.of(List.of(q.orderBy()), q, 0)`.
+4. `ApiErrorsTest`: `@IntegrationTest` и `@Import(ErrorsTestController.class)` (сливается с `@Import` мета-аннотации, проверено прототипом); `LogCapture` через `@RegisterExtension`; все запросы через `Api` (`api.as(Role.OPERATOR)`), без своих свойств и `@MockitoBean`. Тело читать `getContentAsString(StandardCharsets.UTF_8)` или `jsonPath`: без `charset` в ответе `getContentAsString()` декодирует ISO-8859-1 и портит русский текст.
+
+**Безопасность до T1.05.** `SecurityConfig` нет, действует цепочка Spring Boot по умолчанию (`anyRequest().authenticated()`, CSRF включён; пользователь по умолчанию исключён в `NetMonitoringApplication`). Без пользователя ответ 401 с пустым телом, `POST` без CSRF 403 с пустым телом (проверено прототипом). `Api` ставит `user(...)` и `csrf()`, поэтому запросы теста доходят до контроллера. `@EnableMethodSecurity` не вводится (это `SecurityConfig` T1.05): до T1.05 `@PreAuthorize` не действует, `permitAll()` в тестовом контроллере нужен, чтобы тест не сломался после T1.05. `ArchitectureTest` п. 3 тестовый контроллер не проверяет (импорт только `ru.netmon` без тестов), `ApiErrorHandler` не мета-аннотирован `@Controller`; изменений `ArchitectureTest` нет. Тесты 401/403/CSRF в T1.04 не пишутся, кроме `accessDeniedGoesToSecurity`.
 
 **Тестовые помощники (замечания повторного ревью T1.03), только перечисленные файлы `T/testsupport/`; `LogCapture`, `RestartableApp`, `TestPostgres`, `TestData`, `Api`, `IntegrationTest` не меняются:**
-1. `TestDbSelfTest.cleanFailsFastOnLockedTable`: метод с `@Timeout(value = 30, unit = SECONDS)` (`org.junit.jupiter.api.Timeout`), чтобы при неработающем `lock_timeout` тест падал, а не вешал сборку. Предел 30 с совпадает с проверкой «падает за время меньше 30 с».
-2. Там же: `rollback()` чужого соединения выполняется только если `setAutoCommit(false)` завершился успешно (флаг после вызова); исключение `rollback()`/`close()` добавляется к исходному через `addSuppressed`, а не заменяет его.
-3. `MutableClock.withZone(z)`: `this` только при `z.equals(ZoneOffset.UTC)`, без `normalized()`; у `Zoned` `equals`/`hashCode` по паре (исходный `MutableClock` по ссылке, зона) (§12.2). В `TestDbSelfTest`: `withZone(ZoneId.of("UTC")).getZone()` равно `ZoneId.of("UTC")`, а не `ZoneOffset.UTC`; два вызова `withZone` с одной зоной равны и имеют равный `hashCode`; представления с разными зонами не равны.
-4. `TestDb.clean()`: список таблиц для `TRUNCATE` через `format('public.%I', relname)` вместо `quote_ident(relname)` (§12.2): результат не зависит от `search_path`. Запрос списка выносится в пакетный метод `List<String> truncateTargets()`, `clean()` использует его. В `TestDbSelfTest`: каждое имя начинается с `public.`; есть `public.check_result` и `public.system_setting`; нет `public.check_result_default` и `public.flyway_schema_history`.
-5. `LogCapture`: код не меняется; ограничения (рост буфера вне классов с `LogCapture`, строки фоновых потоков, сброс уровней при `start()`/`restart()`) записаны в §12.2, тесты T1.04 и дальше проверяют только свои уникальные строки.
-6. Напоминание (снимок настроек держится на соглашении §12.2): ни `RestartableApp`, ни тест вне `@IntegrationTest` не меняют `system_setting` через API или SQL до первого `@IntegrationTest` в JVM. `ApiErrorsTest` настроек не меняет. Карточки, вводящие изменение настроек (T1.07 и далее), помечают такие тесты `@IntegrationTest` и вызывают `restoreSettings()` в `@AfterEach`.
+1. `TestDbSelfTest.cleanFailsFastOnLockedTable`: `db.clean()` выполняется в отдельном потоке (`Executors.newSingleThreadExecutor()`, `submit`), основной поток ждёт `future.get(30, SECONDS)` и утверждает `ExecutionException` (`assertThrows`); корень цепочки причин `SQLException` с SQLState `55P03`. При неработающем `lock_timeout` `get` бросает `TimeoutException`, тест падает, а `finally` основного потока откатывает и закрывает чужое соединение, блокировка снимается, `clean()` в потоке завершается. В `finally` после этого `shutdown()` и `awaitTermination(30, SECONDS)`, при `false` `IllegalStateException`. Причина отказа от `@Timeout`: поток, ждущий ответа PostgreSQL в сокете, прерыванием не освобождается; с `SAME_THREAD` сборка висит, с `SEPARATE_THREAD` тест падает, но блокировку никто не снимает и `@AfterEach` (`restoreSettings()`) висит на ней (проверено прототипом с `lock_timeout = 0`).
+2. Там же: `rollback()` чужого соединения выполняется только если `setAutoCommit(false)` завершился успешно (флаг после вызова); `close()` всегда; исключение `rollback()`/`close()` при уже летящем исключении теста добавляется к нему через `addSuppressed`, а не заменяет его (исходное запоминается в `catch (Throwable t) { primary = t; throw t; }`), без летящего исключения бросается само.
+3. `MutableClock.withZone(z)`: `this` только при `ZoneOffset.UTC.equals(z)`, без `normalized()`; у `Zoned` `equals` по паре (тот же `MutableClock` по `==`, `zone.equals`), `hashCode` из `System.identityHashCode(base)` и `zone.hashCode()` (§12.2). Новый метод `TestDbSelfTest.clockZoneEquality`: `withZone(ZoneId.of("UTC")).getZone()` равно `ZoneId.of("UTC")` и не равно `ZoneOffset.UTC`; два вызова `withZone` с одной зоной равны и имеют равный `hashCode`; представления с `UTC` и `Europe/Moscow` не равны; `withZone(ZoneOffset.UTC)` есть тот же объект.
+4. `TestDb`: пакетный метод `List<String> truncateTargets()` с запросом `select format('public.%I', relname) from pg_class where …` (прежние условия, `order by relname`); `clean()` вызывает его внутри своей транзакции вместо `quote_ident(relname)`. Новый метод `TestDbSelfTest.truncateTargetsQualified`: каждое имя начинается с `public.`; есть `public.check_result` и `public.system_setting`; нет `public.check_result_default` и `public.flyway_schema_history`.
+5. `LogCapture`: код не меняется; ограничения записаны в §12.2, `ApiErrorsTest` проверяет только свои уникальные строки.
+6. Напоминание (снимок настроек держится на соглашении §12.2): ни `RestartableApp`, ни тест вне `@IntegrationTest` не меняют `system_setting` до первого `@IntegrationTest` в JVM. `ApiErrorsTest` настроек не меняет. Карточки, вводящие изменение настроек (T1.07 и далее), помечают такие тесты `@IntegrationTest` и вызывают `restoreSettings()` в `@AfterEach`.
 
-**Обязательные тесты:**
-- Формат `{code,message,fields}` для 400, 404, 409, 500.
-- Неверный JSON и неверный тип параметра дают 400 на русском, без имён классов.
-- Неожиданное исключение: 500, в теле нет стека и текста исключения; в логе есть (через `LogCapture`).
-- `size` 0, 501, `-1`, `abc`, `page=-1` дают 400; граница `size=500` проходит.
-- Сортировка неизвестным полем и попытка `sort=name;drop table device` дают 400.
-- `TestDbSelfTest`: зелёный с проверками шагов помощников 1–4; в отчёте показать, что при временно выключенном `lock_timeout` метод `cleanFailsFastOnLockedTable` падает по `@Timeout`, а не висит, и вернуть `lock_timeout`.
+**Обязательные тесты (имена методов обязательны):**
+- `ApiErrorsTest.notFoundFormat`: `/not-found` 404, тело ровно `{"code":"NOT_FOUND","message":"Объект не найден","fields":[]}`.
+- `ApiErrorsTest.conflictWithDetails`: `/conflict` 409, `code`, `message`, `fields` пустой, `devices[0].id` = 1.
+- `ApiErrorsTest.validationFields`: `POST /body` с `{"name":"","n":0}` 400 `VALIDATION_FAILED`, `fields` содержит `name` «Название обязательно» и `n` «Не меньше 1»; `GET /checked?n=0` 400 `VALIDATION_FAILED` с полем `n`.
+- `ApiErrorsTest.badJson`: `POST /body` с `{"name":` и с `{"name":"x","n":"abc"}` 400 `BAD_JSON`; тело без `Exception`, `jackson`, `java.`, `ru.netmon`.
+- `ApiErrorsTest.typeMismatch`: `/typed?n=abc` 400 `BAD_PARAMETER`, поле `n`; тело без `NumberFormat`, `java.` и `abc`.
+- `ApiErrorsTest.springErrors`: `GET /api/test-errors/no-such-path` 404 `NOT_FOUND`; `POST /typed` 405 `METHOD_NOT_ALLOWED`; оба с `fields` `[]`.
+- `ApiErrorsTest.dataIntegrity`: `/db` 409 `DATA_CONFLICT`; тело без `ux_marker_db` и `insert`.
+- `ApiErrorsTest.unexpected500`: `/boom?m=<уникальный маркер>` 500 `INTERNAL_ERROR` «Внутренняя ошибка сервера»; тело без маркера, `IllegalState`, `Exception`, `at `; `logs.text()` содержит маркер.
+- `ApiErrorsTest.accessDeniedGoesToSecurity`: `/denied` 403 (ответ фильтра безопасности), тело не содержит `INTERNAL_ERROR`.
+- `ApiErrorsTest.pageLimits`: `size` `0`, `501`, `-1`, `abc`, пустой и `page=-1`, `page=abc` дают 400 `VALIDATION_FAILED` с полем `size` или `page`; `size=500` 200 и `"size":500`; без параметров 200 `{"items":["name asc"],"page":0,"size":50,"total":0}`; `page=2147483647&size=500` 200.
+- `ApiErrorsTest.sortWhitelist`: `sort=foo`, `sort=name;drop table device`, `sort=name,ASC`, `sort=name,asc,x`, `sort=name&sort=createdAt` дают 400 с полем `sort`; `sort=createdAt,desc` даёт `items[0]` = `created_at desc`, `sort=name` даёт `name asc`.
+- `PageQueryTest` (без Spring): умолчания; `offset()` при `page=Integer.MAX_VALUE`, `size=500` равен `2147483647L * 500` без переполнения; `page=-1&size=0&sort=foo` дают одну `ApiException` с тремя полями; `+5` и ` 5` неверны; неверный `defaultSort` даёт `IllegalArgumentException`; `ApiException` с ключом `code` в `details` даёт `IllegalArgumentException`.
+- `TestDbSelfTest`: зелёный с проверками шагов помощников 1–4 (`cleanFailsFastOnLockedTable`, `clockZoneEquality`, `truncateTargetsQualified`); в отчёте показать, что при временно выключенном `lock_timeout` (`set local lock_timeout = 0` в `clean()`) метод `cleanFailsFastOnLockedTable` падает с `TimeoutException` примерно за 30 с и прогон завершается, затем вернуть `'5s'`.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,PageQueryTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest'`
 
-**Критерии готовности:** всё зелёное, тело ошибки соответствует примеру §5.1.
+**Критерии готовности:** всё зелёное, тело ошибки соответствует примеру и таблице §5.1.
 
-**Запрещено:** логика конкретных ресурсов.
+**Запрещено:** логика конкретных ресурсов; `SecurityConfig` и `@EnableMethodSecurity` (T1.05); изменения `ArchitectureTest`.
 
 ---
 
