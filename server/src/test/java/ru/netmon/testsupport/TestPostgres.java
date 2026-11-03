@@ -3,6 +3,7 @@ package ru.netmon.testsupport;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Map;
 import org.springframework.boot.test.util.TestPropertyValues;
 import org.springframework.context.ApplicationContextInitializer;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -37,12 +38,15 @@ public class TestPostgres implements ApplicationContextInitializer<ConfigurableA
         return Holder.PG.getJdbcUrl("postgres", "postgres");
     }
 
+    public static Map<String, String> properties() {
+        return Map.of(
+                "spring.datasource.url", jdbcUrl(),
+                "spring.datasource.username", "postgres",
+                "spring.datasource.password", "postgres");
+    }
+
     @Override
     public void initialize(ConfigurableApplicationContext context) {
-        TestPropertyValues.of(
-                "spring.datasource.url=" + jdbcUrl(),
-                "spring.datasource.username=postgres",
-                "spring.datasource.password=postgres")
-                .applyTo(context);
+        TestPropertyValues.of(properties()).applyTo(context);
     }
 }

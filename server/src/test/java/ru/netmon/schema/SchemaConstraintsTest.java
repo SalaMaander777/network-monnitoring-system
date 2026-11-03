@@ -14,20 +14,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.postgresql.util.PSQLException;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.ContextConfiguration;
-import ru.netmon.testsupport.TestPostgres;
+import ru.netmon.testsupport.IntegrationTest;
 
 /**
  * T1.02: ограничения схемы проверяются прямым SQL. Без @Transactional: после ошибки ограничения
  * транзакция PostgreSQL прервана. Каждый метод создаёт свои строки с уникальными значениями.
  */
-@SpringBootTest
-@ActiveProfiles("test")
-@ContextConfiguration(initializers = TestPostgres.class)
+@IntegrationTest
 class SchemaConstraintsTest {
 
     private static final String UNIQUE_VIOLATION = "23505";
@@ -59,6 +54,7 @@ class SchemaConstraintsTest {
         assertThat(cause).as("PSQLException в цепочке причин: " + sql).isNotNull();
         PSQLException pg = (PSQLException) cause;
         assertThat(pg.getSQLState()).as("SQLSTATE: " + sql).isEqualTo(sqlState);
+        assertThat(pg.getServerErrorMessage()).as("сообщение сервера: " + sql).isNotNull();
         assertThat(pg.getServerErrorMessage().getConstraint()).as("ограничение: " + sql).isEqualTo(constraint);
     }
 
@@ -96,14 +92,21 @@ class SchemaConstraintsTest {
                 "access_secret", "alarm", "app_user", "audit_log", "check_result",
                 "check_result_default", "check_state", "device", "device_group", "device_type",
                 "event", "profile", "profile_check", "system_setting", "trap_rule");
-        assertThat(jdbc.sql("select relkind::text from pg_class where relname = 'check_result'")
+        assertThat(jdbc.sql("select relkind::text from pg_class where oid = 'public.check_result'::regclass")
                 .query(String.class).single()).isEqualTo("p");
         long deviceId = 900_000_000_000L + ThreadLocalRandom.current().nextLong(1_000_000_000L);
         long checkId = 900_000_000_000L + ThreadLocalRandom.current().nextLong(1_000_000_000L);
-        jdbc.sql("insert into check_result(ts,device_id,check_id,success,duration_ms) values (now(),?,?,true,5)")
-                .params(deviceId, checkId).update();
-        assertThat(jdbc.sql("select tableoid::regclass::text from check_result where device_id = ? and check_id = ?")
-                .params(deviceId, checkId).query(String.class).single()).isEqualTo("check_result_default");
+        long deleted;
+        try {
+            jdbc.sql("insert into check_result(ts,device_id,check_id,success,duration_ms) values (now(),?,?,true,5)")
+                    .params(deviceId, checkId).update();
+            assertThat(jdbc.sql("select tableoid::regclass::text from check_result where device_id = ? and check_id = ?")
+                    .params(deviceId, checkId).query(String.class).single()).isEqualTo("check_result_default");
+        } finally {
+            deleted = jdbc.sql("delete from check_result where device_id=? and check_id=?")
+                    .params(deviceId, checkId).update();
+        }
+        assertThat(deleted).isEqualTo(1);
     }
 
     @Test
@@ -113,9 +116,11 @@ class SchemaConstraintsTest {
         String ip = ip();
         long first = device(t, ip, p);
         rejected(UNIQUE_VIOLATION, "ux_device_ip_active", INSERT_DEVICE, t, ip, 0, 0, p);
-        jdbc.sql("update device set deleted_at=now(), profile_id=null where id=?").params(first).update();
+        assertThat(jdbc.sql("update device set deleted_at=now(), profile_id=null where id=?").params(first).update())
+                .isEqualTo(1);
         long second = device(t, ip, p);
-        jdbc.sql("update device set deleted_at=now(), profile_id=null where id=?").params(second).update();
+        assertThat(jdbc.sql("update device set deleted_at=now(), profile_id=null where id=?").params(second).update())
+                .isEqualTo(1);
         long third = device(t, ip, p);
         assertThat(third).isNotEqualTo(second);
     }
@@ -171,7 +176,8 @@ class SchemaConstraintsTest {
                 + " values (?,'WARNING','k','r','CHECK',now())";
         long first = id(ins + " returning id", d);
         rejected(UNIQUE_VIOLATION, "ux_alarm_active", ins, d);
-        jdbc.sql("update alarm set ended_at=now(), close_reason='RECOVERED' where id=?").params(first).update();
+        assertThat(jdbc.sql("update alarm set ended_at=now(), close_reason='RECOVERED' where id=?").params(first)
+                .update()).isEqualTo(1);
         long next = id(ins + " returning id", d);
         assertThat(next).isNotEqualTo(first);
         rejected(CHECK_VIOLATION, "alarm_check",
@@ -212,7 +218,9 @@ class SchemaConstraintsTest {
     @Test
     void defaultSettings() {
         Map<String, String> actual = new HashMap<>();
-        jdbc.sql("select key, value from system_setting")
+        jdbc.sql("select key, value from system_setting where key in ('retention.results_days',"
+                + "'retention.journal_days','traps.udp_port','session.timeout_minutes','auth.lock_attempts',"
+                + "'auth.lock_minutes')")
                 .query(rs -> {
                     actual.put(rs.getString(1), rs.getString(2));
                 });

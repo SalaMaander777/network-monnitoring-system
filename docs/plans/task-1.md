@@ -148,11 +148,19 @@
 **Цель:** все ошибки и постраничные ответы API имеют единый формат без утечки внутренностей.
 **Исполнитель:** backend-core. **Зависит от:** T1.03.
 
-**Файлы:** `S/common/web/ApiException.java`, `FieldError.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`, `T/common/ApiErrorsTest.java`, `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, подключается к `ApiErrorsTest` через `@Import`, §12.2 «Тестовые контроллеры и бины»; пути под `/api/test-errors/`, методы с `@PreAuthorize("permitAll()")`).
+**Файлы:** `S/common/web/ApiException.java`, `FieldError.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`, `T/common/ApiErrorsTest.java`, `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, подключается к `ApiErrorsTest` через `@Import`, §12.2 «Тестовые контроллеры и бины»; пути под `/api/test-errors/`, методы с `@PreAuthorize("permitAll()")`); по шагам «Тестовые помощники» (неблокирующие замечания ревью T1.03): `T/testsupport/TestDb.java`, `T/testsupport/MutableClock.java`, `T/testsupport/TestDbSelfTest.java`.
 
-**Контракты:** §5.1.
+**Контракты:** §5.1; для шагов помощников §12.2, §14.
 
 **Шаги:** обработчик `@RestControllerAdvice` для `ApiException`, ошибок разбора JSON, проверки Bean Validation, неверного типа параметра, нарушения ограничения БД, неожиданного исключения. `PageQuery.parse(page,size,sort,разрешённые)`.
+
+**Тестовые помощники (замечания повторного ревью T1.03), только перечисленные файлы `T/testsupport/`; `LogCapture`, `RestartableApp`, `TestPostgres`, `TestData`, `Api`, `IntegrationTest` не меняются:**
+1. `TestDbSelfTest.cleanFailsFastOnLockedTable`: метод с `@Timeout(value = 30, unit = SECONDS)` (`org.junit.jupiter.api.Timeout`), чтобы при неработающем `lock_timeout` тест падал, а не вешал сборку. Предел 30 с совпадает с проверкой «падает за время меньше 30 с».
+2. Там же: `rollback()` чужого соединения выполняется только если `setAutoCommit(false)` завершился успешно (флаг после вызова); исключение `rollback()`/`close()` добавляется к исходному через `addSuppressed`, а не заменяет его.
+3. `MutableClock.withZone(z)`: `this` только при `z.equals(ZoneOffset.UTC)`, без `normalized()`; у `Zoned` `equals`/`hashCode` по паре (исходный `MutableClock` по ссылке, зона) (§12.2). В `TestDbSelfTest`: `withZone(ZoneId.of("UTC")).getZone()` равно `ZoneId.of("UTC")`, а не `ZoneOffset.UTC`; два вызова `withZone` с одной зоной равны и имеют равный `hashCode`; представления с разными зонами не равны.
+4. `TestDb.clean()`: список таблиц для `TRUNCATE` через `format('public.%I', relname)` вместо `quote_ident(relname)` (§12.2): результат не зависит от `search_path`. Запрос списка выносится в пакетный метод `List<String> truncateTargets()`, `clean()` использует его. В `TestDbSelfTest`: каждое имя начинается с `public.`; есть `public.check_result` и `public.system_setting`; нет `public.check_result_default` и `public.flyway_schema_history`.
+5. `LogCapture`: код не меняется; ограничения (рост буфера вне классов с `LogCapture`, строки фоновых потоков, сброс уровней при `start()`/`restart()`) записаны в §12.2, тесты T1.04 и дальше проверяют только свои уникальные строки.
+6. Напоминание (снимок настроек держится на соглашении §12.2): ни `RestartableApp`, ни тест вне `@IntegrationTest` не меняют `system_setting` через API или SQL до первого `@IntegrationTest` в JVM. `ApiErrorsTest` настроек не меняет. Карточки, вводящие изменение настроек (T1.07 и далее), помечают такие тесты `@IntegrationTest` и вызывают `restoreSettings()` в `@AfterEach`.
 
 **Обязательные тесты:**
 - Формат `{code,message,fields}` для 400, 404, 409, 500.
@@ -160,8 +168,9 @@
 - Неожиданное исключение: 500, в теле нет стека и текста исключения; в логе есть (через `LogCapture`).
 - `size` 0, 501, `-1`, `abc`, `page=-1` дают 400; граница `size=500` проходит.
 - Сортировка неизвестным полем и попытка `sort=name;drop table device` дают 400.
+- `TestDbSelfTest`: зелёный с проверками шагов помощников 1–4; в отчёте показать, что при временно выключенном `lock_timeout` метод `cleanFailsFastOnLockedTable` падает по `@Timeout`, а не висит, и вернуть `lock_timeout`.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest'`
 
 **Критерии готовности:** всё зелёное, тело ошибки соответствует примеру §5.1.
 
