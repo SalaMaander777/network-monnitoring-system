@@ -42,10 +42,14 @@ public class TestDb {
     snapshotOnce();
     tx.executeWithoutResult(st -> {
       jdbc.sql("set local lock_timeout = '5s'").update();
-      List<String> t = jdbc.sql("select quote_ident(relname) from pg_class where relnamespace = 'public'::regnamespace and relkind in ('r','p') and not relispartition and relname <> 'flyway_schema_history' order by relname").query(String.class).list();
+      List<String> t = truncateTargets();
       jdbc.sql("truncate " + String.join(", ", t)).update();
       insertDefaults();
     });
+  }
+
+  List<String> truncateTargets() {
+    return jdbc.sql("select format('public.%I', relname) from pg_class where relnamespace = 'public'::regnamespace and relkind in ('r','p') and not relispartition and relname <> 'flyway_schema_history' order by relname").query(String.class).list();
   }
 
   public void restoreSettings() {

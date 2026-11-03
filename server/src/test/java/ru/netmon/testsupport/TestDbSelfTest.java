@@ -6,6 +6,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import ch.qos.logback.classic.Level;
@@ -154,29 +163,78 @@ class TestDbSelfTest {
     }
 
     @Test
-    void cleanFailsFastOnLockedTable() throws Exception {
+    void cleanFailsFastOnLockedTable() throws Throwable {
         Connection c = dataSource.getConnection();
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        Throwable primary = null;
+        boolean manual = false;
         try {
             c.setAutoCommit(false);
+            manual = true;
             try (Statement st = c.createStatement()) {
                 st.execute("lock table device_type in access share mode");
             }
-            long t0 = System.nanoTime();
-            Throwable thrown = org.junit.jupiter.api.Assertions.assertThrows(Throwable.class, () -> db.clean());
-            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofSeconds(30));
+            Future<?> future = pool.submit(() -> db.clean());
+            ExecutionException thrown = assertThrows(ExecutionException.class, () -> future.get(30, TimeUnit.SECONDS));
             Throwable root = thrown;
             while (root.getCause() != null && root.getCause() != root) {
                 root = root.getCause();
             }
             assertThat(root).isInstanceOf(SQLException.class);
             assertThat(((SQLException) root).getSQLState()).isEqualTo("55P03");
+        } catch (Throwable t) {
+            primary = t;
+            throw t;
         } finally {
+            Throwable cleanup = null;
             try {
-                c.rollback();
-            } finally {
-                c.close();
+                try {
+                    if (manual) {
+                        c.rollback();
+                    }
+                } finally {
+                    c.close();
+                }
+            } catch (Throwable t) {
+                cleanup = t;
+            }
+            try {
+                pool.shutdown();
+                if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("clean() не завершился после снятия блокировки");
+                }
+            } catch (Throwable t) {
+                if (cleanup == null) {
+                    cleanup = t;
+                } else {
+                    cleanup.addSuppressed(t);
+                }
+            }
+            if (cleanup != null) {
+                if (primary == null) {
+                    throw cleanup;
+                }
+                primary.addSuppressed(cleanup);
             }
         }
+    }
+
+    @Test
+    void clockZoneEquality() {
+        Clock utc = mutableClock.withZone(ZoneId.of("UTC"));
+        assertThat(utc.getZone()).isEqualTo(ZoneId.of("UTC")).isNotEqualTo(ZoneOffset.UTC);
+        Clock again = mutableClock.withZone(ZoneId.of("UTC"));
+        assertThat(utc).isEqualTo(again).hasSameHashCodeAs(again);
+        assertThat(utc).isNotEqualTo(mutableClock.withZone(ZoneId.of("Europe/Moscow")));
+        assertThat(mutableClock.withZone(ZoneOffset.UTC)).isSameAs(mutableClock);
+    }
+
+    @Test
+    void truncateTargetsQualified() {
+        List<String> t = db.truncateTargets();
+        assertThat(t).allMatch(n -> n.startsWith("public."));
+        assertThat(t).contains("public.check_result", "public.system_setting")
+                .doesNotContain("public.check_result_default", "public.flyway_schema_history");
     }
 
     @Test

@@ -7,13 +7,15 @@ public final class MutableClock extends Clock {
   public synchronized void reset() { now = start(); }
   public Instant instant() { return now; }
   public ZoneId getZone() { return ZoneOffset.UTC; }
-  public Clock withZone(ZoneId z) { return ZoneOffset.UTC.equals(z.normalized()) ? this : new Zoned(this, z); }
+  public Clock withZone(ZoneId z) { return ZoneOffset.UTC.equals(z) ? this : new Zoned(this, z); }
   private static final class Zoned extends Clock {
     private final MutableClock base; private final ZoneId zone;
     private Zoned(MutableClock base, ZoneId zone) { this.base = base; this.zone = java.util.Objects.requireNonNull(zone); }
     public Instant instant() { return base.instant(); }
     public ZoneId getZone() { return zone; }
     public Clock withZone(ZoneId z) { return base.withZone(z); }
+    @Override public boolean equals(Object o) { return o instanceof Zoned x && x.base == base && x.zone.equals(zone); }
+    @Override public int hashCode() { return System.identityHashCode(base) * 31 + zone.hashCode(); }
   }
   public synchronized void set(Instant i) { now = java.util.Objects.requireNonNull(i); }
   public synchronized void advance(Duration d) { now = now.plus(d); }
