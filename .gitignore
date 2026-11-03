@@ -21,3 +21,11 @@ secret.key
 *.pem
 .env
 .env.*
+
+# Каталоги T1.01
+/offline/
+/tools/
+/data/
+/server/data/
+/*.log
+/server/*.log

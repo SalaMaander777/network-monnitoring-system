@@ -1,0 +1,9 @@
+nm:
+  poll:
+    enabled: false
+  jobs:
+    enabled: false
+  traps:
+    enabled: false
+  seed:
+    enabled: false

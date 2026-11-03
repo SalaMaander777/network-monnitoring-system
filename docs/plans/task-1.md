@@ -17,7 +17,7 @@
 **Цель:** многомодульный Maven-проект собирается, запускает пустое приложение на встроенном PostgreSQL в тесте и пересобирается без сети.
 **Исполнитель:** backend-core. **Зависит от:** нет.
 
-**Файлы:** `pom.xml`, `server/pom.xml`, `emulators/pom.xml`, `.gitignore`, `scripts/prepare-offline.sh`, `.ps1`, `scripts/offline-verify.sh`, `.ps1`, `S/NetMonitoringApplication.java`, `R/application.yml`, `server/src/test/resources/application-test.yml`, `T/testsupport/TestPostgres.java`, `T/SmokeTest.java`, `emulators/src/main/java/ru/netmon/emulators/EmulatorMain.java`, `emulators/src/test/java/ru/netmon/emulators/EmulatorMainTest.java`, `emulators/src/test/java/ru/netmon/emulators/probe/Main.java`, `emulators/src/test/java/ru/netmon/emulators/voidprobe/Main.java`.
+**Файлы:** `pom.xml`, `server/pom.xml`, `emulators/pom.xml`, `.gitignore`, `scripts/prepare-offline.sh`, `.ps1`, `scripts/offline-verify.sh`, `.ps1`, `S/NetMonitoringApplication.java`, `R/application.yml`, `server/src/test/resources/application-test.yml`, `T/testsupport/TestPostgres.java`, `T/SmokeTest.java`, `emulators/src/main/java/ru/netmon/emulators/EmulatorMain.java`, `emulators/src/test/java/ru/netmon/emulators/EmulatorMainTest.java`, `emulators/src/test/java/ru/netmon/emulators/probe/Main.java`, `emulators/src/test/java/ru/netmon/emulators/voidprobe/Main.java`, `emulators/src/test/java/ru/netmon/emulators/hiddenprobe/Main.java`, `emulators/src/test/java/ru/netmon/emulators/initprobe/Main.java`.
 
 **Контракты:** §1 версии, §2 структура, §3 сборка, §12.1, §12.2, §12.5, §13.
 
@@ -26,14 +26,14 @@
 1. Родитель `ru.netmon:nm-parent:0.1.0` (координаты §2): `spring-boot-starter-parent:4.1.2`, `java.version=21` (даёт `maven.compiler.release=21`), свойство `pg.binaries.version=18.6.0` и импорт BOM по §3, `surefire.failIfNoSpecifiedTests=false`, enforcer по §3, модули `emulators`, `server`.
 2. `server` (`nm-server`): стартеры и тестовые зависимости из §3, `flyway-database-postgresql`, `postgresql`, `snmp4j:3.9.7` (compile, §3), `embedded-postgres:2.2.2`, `archunit-junit5:1.5.1`, `nm-emulators` в области `test` с исключением `slf4j-simple`. Плагин `spring-boot-maven-plugin`. Сгенерированный пароль Spring Security не выводится (§3).
 3. `emulators` (`nm-emulators`): `snmp4j:3.9.7`, `slf4j-simple`; в области `test` `junit-jupiter` и `assertj-core` без версии (BOM, §3); `spring-boot-maven-plugin` с `repackage`, `classifier=exec`, `mainClass=ru.netmon.emulators.EmulatorMain`.
-4. `EmulatorMain` по контракту §12.5: `int run(String[])`, первый аргумент вид по шаблону `[a-z]+`, загрузка `ru.netmon.emulators.<вид>.Main` через reflection, вызов его `public static int run(String[])` с аргументами без первого, возврат его кода. Без аргумента, с недопустимым или неизвестным видом, у вида нет `int run(String[])`: сообщение в stderr и код 2; исключение внутри вида: код 1.
-5. `TestPostgres` по §12.2; `SmokeTest`: `@SpringBootTest`, `@ActiveProfiles("test")`, `@ContextConfiguration(initializers = TestPostgres.class)`.
-6. `prepare-offline`: `mvn -B -Dmaven.repo.local=offline/m2 verify`. `offline-verify`: проверяет наличие `offline/m2/io/zonky/test/postgres/embedded-postgres-binaries-windows-amd64`, затем `mvn -B -o -Dmaven.repo.local=offline/m2 verify`. Скрипты находят корень проекта от своего положения.
-7. `.gitignore`: `target/`, `offline/`, `tools/`, `data/`, `*.log`.
+4. `EmulatorMain` по контракту §12.5: `int run(String[])`, первый аргумент вид по шаблону `[a-z]+`, загрузка `ru.netmon.emulators.<вид>.Main` без инициализации (`Class.forName(name, false, loader)`), вызов его `public static int run(String[])` с аргументами без первого, возврат его кода. Код 2 и сообщение в stderr: нет аргумента, недопустимый вид, класс не найден, `LinkageError` при загрузке или связывании, класс не `public`, нет `public static int run(String[])`, `IllegalAccessException`. Код 1: исключение внутри вида, включая `ExceptionInInitializerError` при отложенной инициализации класса вида.
+5. `TestPostgres` по §12.2; `SmokeTest`: `@SpringBootTest`, `@ActiveProfiles("test")`, `@ContextConfiguration(initializers = TestPostgres.class)`, `OutputCaptureExtension`.
+6. `prepare-offline`: `mvn -B -Dmaven.repo.local=offline/m2 verify`. `offline-verify`: проверяет наличие хотя бы одного `*.jar` в `offline/m2/io/zonky/test/postgres/embedded-postgres-binaries-windows-amd64/<pg.binaries.version>/` (версия читается из корневого `pom.xml`), иначе сообщение в stderr и ненулевой код; затем `mvn -B -o -Dmaven.repo.local=offline/m2 verify`. Скрипты находят корень проекта от своего положения: `.sh` через `CDPATH= cd -- "$(dirname -- "$0")/.." >/dev/null && pwd`; `.ps1` сохраняются в UTF-8 с BOM (иначе Windows PowerShell 5.1 читает кириллицу в ANSI-кодировке), переход в корень через `Push-Location`, возврат `Pop-Location` в `finally` блока `try/finally`.
+7. `.gitignore`: `target/` без привязки (на любой глубине); остальные записи привязаны к корню: `/offline/`, `/tools/`, `/data/`, `/server/data/` (рабочий каталог данных при тестах Surefire), `/*.log`, `/server/*.log`. Причина привязки: непривязанные `data/` и `*.log` скрывали пакеты `data` и фикстуры `*.log` в исходниках.
 
 **Обязательные тесты:**
-- `SmokeTest`: контекст поднимается, `select version()` начинается с `PostgreSQL 18`; в выводе (`OutputCaptureExtension`) нет `generated security password`.
-- `EmulatorMainTest`: неизвестный вид и пустые аргументы дают код 2; разбор имени не выполняет произвольный класс с точками в имени (негативный случай `a.b`, код 2); тестовый вид `probe` (`int run(String[])`) получает аргументы без первого, и его код возвращается; тестовый вид `voidprobe` (`void run(String[])`) даёт код 2; проверка через `run`, без `System.exit`.
+- `SmokeTest`: контекст поднимается, `select version()` начинается с `PostgreSQL 18`; в выводе (`OutputCaptureExtension`) есть `Started SmokeTest in` (положительный контроль: захват вывода работает) и нет `generated security password`.
+- `EmulatorMainTest`: неизвестный вид и пустые аргументы дают код 2; разбор имени не выполняет произвольный класс с точками в имени (негативный случай `a.b`, код 2); тестовый вид `probe` (`int run(String[])`) получает аргументы без первого, и его код возвращается; тестовый вид `voidprobe` (`void run(String[])`) даёт код 2; тестовый вид `hiddenprobe` (непубличный класс `Main`) даёт код 2; тестовый вид `initprobe` (статический инициализатор бросает исключение, `public static int run(String[])` корректен) даёт код 1, что одновременно доказывает загрузку без инициализации: при инициализации во время `Class.forName` `ExceptionInInitializerError` (подкласс `LinkageError`) дал бы код 2; проверка через `run`, без `System.exit`.
 
 **Команда проверки:** `scripts/prepare-offline.sh && scripts/offline-verify.sh`
 
@@ -79,7 +79,7 @@
 **Цель:** все межмодульные типы и интерфейсы §7 существуют и защищены тестом границ, чтобы дальше исполнители работали параллельно.
 **Исполнитель:** backend-core. **Зависит от:** T1.02.
 
-**Файлы:** `S/contract/*.java` (группируются вложенными record и enum по §7.1, допустимо до 25 небольших файлов без логики, это исключение правила о числе файлов), `S/contract/events/*.java`, `S/stream/SeqStreamPublisher.java`, `S/common/ClockConfig.java`, `T/testsupport/` (`IntegrationTest`, `TestDb`, `TestData`, `MutableClock`, `Api`, `LogCapture`, `RestartableApp`), `T/ArchitectureTest.java`, `T/contract/ContractTypesTest.java`.
+**Файлы:** `S/contract/*.java` (группируются вложенными record и enum по §7.1, допустимо до 25 небольших файлов без логики, это исключение правила о числе файлов), `S/contract/events/*.java`, `S/stream/SeqStreamPublisher.java`, `S/common/ClockConfig.java`, `T/testsupport/` (`IntegrationTest`, `TestDb`, `TestData`, `MutableClock`, `Api`, `LogCapture`, `RestartableApp`; правка `TestPostgres` по шагу 6), `T/ArchitectureTest.java`, `T/contract/ContractTypesTest.java`.
 
 **Контракты:** §2.2, §7.1, §7.2, §12.2, §14.
 
@@ -89,6 +89,7 @@
 3. `SeqStreamPublisher`: возрастающий `seq`, `publish` ничего не отправляет. Реализует `StreamPublisher`.
 4. `ArchitectureTest` с правилами §2.2 пунктов 1, 2, 4. Правило 3 для контроллеров: пока контроллеров нет, правило активируется `allowEmptyShould(true)`.
 5. Помощники §12.2. `Api` использует `SecurityMockMvcRequestPostProcessors.user(...)` и `csrf()`. `RestartableApp` запускает реальный Tomcat на случайном порту.
+6. В `T/testsupport/TestPostgres.java` добавить `public static Map<String,String> properties()` (пока только `spring.datasource.url/username/password`); `initialize` и `RestartableApp` передают свойства только из него (§12.2, «Каталог данных в тестах»). Других изменений `TestPostgres` нет.
 
 **Обязательные тесты:**
 - `ContractTypesTest`: порядок `DeviceStatus` = худший первым; `toString` секретных типов не содержит значения; `equals` и логирование через `String.valueOf` также не раскрывают значение.
@@ -586,11 +587,14 @@
 **Цель:** секрет в БД зашифрован AES-256-GCM, ключ лежит в файле вне БД, потеря ключа не приводит к его подмене.
 **Исполнитель:** backend-core. **Зависит от:** T1.07.
 
-**Файлы:** `S/secret/SecretCipher.java`, `SecretKeyFile.java`, `SecretKeyStartupCheck.java`, `T/secret/SecretCipherTest.java`, `T/secret/SecretKeyFileTest.java`.
+**Файлы:** `S/secret/SecretCipher.java`, `SecretKeyFile.java`, `SecretKeyStartupCheck.java`, `T/secret/SecretCipherTest.java`, `T/secret/SecretKeyFileTest.java`, `T/secret/SecretKeyTestDirTest.java`, `T/testsupport/TestPostgres.java` (только добавление `nm.data-dir`).
 
-**Контракты:** §10 пункты 1, 2.
+**Контракты:** §10 пункты 1, 2; §12.2 «Каталог данных в тестах»; §13.
 
-**Шаги:** реализовать правила §10.2 точно. Запись нового ключа: во временный файл, затем атомарное переименование. Проверка при старте смотрит `count(*)` в `access_secret`.
+**Шаги:**
+1. До первого контекста, который создаёт ключ: в `TestPostgres.properties()` добавить `nm.data-dir` на временный каталог JVM (`Files.createTempDirectory("nm-test-data-")`, один на процесс, удаление хуком завершения). `application-test.yml` не меняется.
+2. Реализовать правила §10.2 точно. Путь ключа только из `nm.secret-key-file`. Запись нового ключа: во временный файл, затем атомарное переименование. Проверка при старте смотрит `count(*)` в `access_secret`.
+3. Модульные тесты `SecretKeyFile` работают на `@TempDir` и не поднимают контекст.
 
 **Обязательные тесты:**
 - Шифрование и расшифровка, кириллица, пустая строка, длина 10 КБ.
@@ -602,8 +606,9 @@
 - Файл с неверным Base64, 31 байтом, пустой: запуск прерывается. Файл с завершающим переводом строки читается.
 - SEC-02: шифртекст в таблице не содержит открытого значения в байтах.
 - Ключ и его значение не появляются в логах (`LogCapture`).
+- `SecretKeyTestDirTest` (`@IntegrationTest`): файл по `nm.secret-key-file` существует, лежит внутри `nm.data-dir`, а `nm.data-dir` внутри `java.io.tmpdir`; путь ключа не лежит внутри рабочего каталога процесса (`user.dir`), то есть не в дереве исходников; `RestartableApp` после перезапуска читает тот же ключ (расшифровывает шифртекст первого запуска).
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretCipherTest,SecretKeyFileTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretCipherTest,SecretKeyFileTest,SecretKeyTestDirTest,ArchitectureTest'`
 
 **Критерии готовности:** тесты зелёные. Права на файл ключа в Windows: [проверка человеком], T8.06.
 

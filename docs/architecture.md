@@ -693,7 +693,9 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 | `LogCapture` | Захват всего вывода Logback для поиска секрета |
 | `RestartableApp` | Запуск приложения через `SpringApplicationBuilder` на той же БД, остановка, повтор; реальный порт |
 
-Профиль `test`: `nm.poll.enabled=false`, `nm.jobs.enabled=false`, `nm.traps.enabled=false`, `nm.seed.enabled=false`, ключ секретов в каталоге теста. Каждый тест включает нужное явно.
+Профиль `test`: `nm.poll.enabled=false`, `nm.jobs.enabled=false`, `nm.traps.enabled=false`, `nm.seed.enabled=false`. Каждый тест включает нужное явно.
+
+**Каталог данных в тестах.** Свойство `nm.data-dir` (а не `nm.secret-key-file`) указывает на временный каталог процесса JVM: `TestPostgres` создаёт его один раз через `Files.createTempDirectory("nm-test-data-")` рядом с запуском PostgreSQL, удаляет хуком завершения JVM и передаёт вместе с `spring.datasource.*`. Набор свойств отдаёт `public static Map<String,String> TestPostgres.properties()`; `initialize` и `RestartableApp` берут свойства только оттуда, поэтому перезапуск видит тот же ключ. `nm.secret-key-file` и `nm.tiles-file` выводятся из `nm.data-dir` по §13 и в тестах не задаются; тест, которому нужен свой файл ключа, задаёт `nm.secret-key-file` на `@TempDir` явно. В `application-test.yml` свойство не пишется. Причина: каталог должен быть один на JVM и вне дерева исходников, а значение в YAML либо относительное (`./data` от рабочего каталога даёт `server/data/`), либо через `${random.uuid}`, который вычисляется заново при каждом разрешении. Распределение: T1.03 вводит `properties()` с `spring.datasource.*`, T1.21 добавляет в него `nm.data-dir`. До T1.21 файлы в `nm.data-dir` никто не пишет.
 
 ### 12.3 Матрица прав
 
@@ -705,7 +707,7 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 
 ### 12.5 Эмуляторы (OPS-11)
 
-Модуль `emulators`: в `compile`/`runtime` зависит только от `snmp4j` и `slf4j-simple`, в `test` только от `junit-jupiter` и `assertj-core` из BOM (§3). `java -jar emulators/target/nm-emulators-0.1.0-exec.jar <вид> [--ключ=значение]`; вид `tcp`, `hang`, `scpi`, `snmp`, `trap`. `EmulatorMain` (T1.01) ищет класс `ru.netmon.emulators.<вид>.Main`, поэтому новые виды не правят его файл. Контракт: `public static int run(String[] args)` возвращает код, `main` вызывает `System.exit(run(args))`; тесты вызывают только `run`. Класс вида `ru.netmon.emulators.<вид>.Main` тоже объявляет `public static int run(String[] args)`; `EmulatorMain.run` вызывает его с аргументами без первого и возвращает его код. У класса вида нет такого метода или он возвращает не `int`: сообщение в stderr и код 2. Исключение внутри вида: сообщение в stderr и код 1. Вид допускается только по шаблону `[a-z]+`, иначе код 2 без загрузки класса. Неизвестный вид или пустые аргументы: сообщение в stderr и код выхода 2. Код вида-эмулятора: 0 при штатном завершении.
+Модуль `emulators`: в `compile`/`runtime` зависит только от `snmp4j` и `slf4j-simple`, в `test` только от `junit-jupiter` и `assertj-core` из BOM (§3). `java -jar emulators/target/nm-emulators-0.1.0-exec.jar <вид> [--ключ=значение]`; вид `tcp`, `hang`, `scpi`, `snmp`, `trap`. `EmulatorMain` (T1.01) ищет класс `ru.netmon.emulators.<вид>.Main`, поэтому новые виды не правят его файл. Контракт: `public static int run(String[] args)` возвращает код, `main` вызывает `System.exit(run(args))`; тесты вызывают только `run`. Класс вида `ru.netmon.emulators.<вид>.Main` тоже объявляет `public static int run(String[] args)`; `EmulatorMain.run` загружает класс вида без инициализации (`Class.forName(name, false, loader)`), вызывает его `run` с аргументами без первого и возвращает его код. Код 2 и сообщение в stderr: класс не найден; `LinkageError` при загрузке или связывании; класс не `public`; нет `public static int run(String[])` (в том числе метод возвращает не `int`); `IllegalAccessException`. Код 1 и сообщение в stderr: исключение внутри вида, включая `ExceptionInInitializerError` при отложенной инициализации класса вида (первый вызов `run`). Причина загрузки без инициализации: ошибка статического инициализатора относится к поведению вида, а не к его отсутствию. Вид допускается только по шаблону `[a-z]+`, иначе код 2 без загрузки класса. Неизвестный вид или пустые аргументы: сообщение в stderr и код выхода 2. Код вида-эмулятора: 0 при штатном завершении.
 
 Каждый эмулятор также имеет класс с `start()`, `port()` и `close()` для запуска прямо из теста, порт `0` даёт случайный свободный. `server` подключает модуль только в области `test`. Данные SNMP берутся из файла в формате `oid = ТИП: значение`, значения тестовые и не считаются подтверждением.
 
@@ -719,7 +721,7 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 |---|---|---|
 | `server.port` | 8080 | Порт интерфейса |
 | `spring.datasource.*` | нет | Подключение к БД |
-| `nm.data-dir` | `./data` | Данные на диске |
+| `nm.data-dir` | `./data` | Данные на диске; в тестах временный каталог JVM (§12.2) |
 | `nm.secret-key-file` | `${nm.data-dir}/secret.key` | Ключ секретов |
 | `nm.tiles-file` | `${nm.data-dir}/moscow.mbtiles` | Файл тайлов |
 | `nm.bootstrap.admin-login`, `nm.bootstrap.admin-password-file` | нет | Первый администратор, T1.10 |

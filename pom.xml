@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.2</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>ru.netmon</groupId>
+  <artifactId>nm-parent</artifactId>
+  <version>0.1.0</version>
+  <packaging>pom</packaging>
+  <name>nm-parent</name>
+
+  <modules>
+    <module>emulators</module>
+    <module>server</module>
+  </modules>
+
+  <properties>
+    <java.version>21</java.version>
+    <pg.binaries.version>18.6.0</pg.binaries.version>
+    <snmp4j.version>3.9.7</snmp4j.version>
+    <embedded-postgres.version>2.2.2</embedded-postgres.version>
+    <archunit.version>1.5.1</archunit.version>
+    <surefire.failIfNoSpecifiedTests>false</surefire.failIfNoSpecifiedTests>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.zonky.test.postgres</groupId>
+        <artifactId>embedded-postgres-binaries-bom</artifactId>
+        <version>${pg.binaries.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.snmp4j</groupId>
+        <artifactId>snmp4j</artifactId>
+        <version>${snmp4j.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.zonky.test</groupId>
+        <artifactId>embedded-postgres</artifactId>
+        <version>${embedded-postgres.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.tngtech.archunit</groupId>
+        <artifactId>archunit-junit5</artifactId>
+        <version>${archunit.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>ru.netmon</groupId>
+        <artifactId>nm-emulators</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-versions</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <requireJavaVersion><version>[21,)</version></requireJavaVersion>
+                <requireMavenVersion><version>[3.9,4)</version></requireMavenVersion>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

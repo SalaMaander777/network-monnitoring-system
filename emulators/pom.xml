@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>ru.netmon</groupId>
+    <artifactId>nm-parent</artifactId>
+    <version>0.1.0</version>
+  </parent>
+
+  <artifactId>nm-emulators</artifactId>
+  <name>nm-emulators</name>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.snmp4j</groupId>
+      <artifactId>snmp4j</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <classifier>exec</classifier>
+          <mainClass>ru.netmon.emulators.EmulatorMain</mainClass>
+        </configuration>
+        <executions>
+          <execution>
+            <id>repackage</id>
+            <goals><goal>repackage</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: nm-server
+
+server:
+  port: 8080
+
+nm:
+  data-dir: ./data
+  secret-key-file: ${nm.data-dir}/secret.key
+  tiles-file: ${nm.data-dir}/moscow.mbtiles
+  poll:
+    enabled: true
+    max-concurrent: 200
+  jobs:
+    enabled: true
+  traps:
+    enabled: true
+  seed:
+    enabled: true
