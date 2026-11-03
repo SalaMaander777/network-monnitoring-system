@@ -19,7 +19,7 @@
 | Доступ к БД | `JdbcClient` (spring-jdbc), без JPA/Hibernate | Разделы, частичные индексы, `ON CONFLICT` и пакетная запись видны прямо в SQL |
 | SNMP | `org.snmp4j:snmp4j:3.9.7` | Есть в Central, разрешается [ПОДТВ] |
 | Excel | `org.apache.poi:poi-ooxml:5.5.1` | Зрелая ветка 5.x, не первая версия 6 |
-| Тесты БД | `io.zonky.test:embedded-postgres:2.2.2` | Без Docker. Двоичные файлы Windows и macOS (универсальные x86_64/arm64) разрешаются вместе [ПОДТВ] |
+| Тесты БД | `io.zonky.test:embedded-postgres:2.2.2` | Без Docker. Транзитивно (область `runtime`) приходят двоичные файлы `windows-amd64`, `linux-amd64`, `linux-amd64-alpine`, `darwin-amd64`; все они x86_64 [ПОДТВ состав `offline/m2`]. Поддерживаемые платформы тестов в §3 |
 | Границы модулей | `com.tngtech.archunit:archunit-junit5:1.5.1` | [ПОДТВ] |
 | Браузерные тесты | Selenium из BOM 4.43.0, geckodriver 0.37.1 (минимум Firefox 115 ESR по таблице Mozilla), Firefox 115.44.0esr, Chrome for Testing 156.0.8078.80 | Playwright не управляет Firefox 115. Selenium Manager отключён, пути к драйверам заданы явно (§12.4) |
 | Карта | Leaflet 1.9.4, Leaflet.markercluster 1.5.3, локальные файлы | Раздел 10 ТЗ |
@@ -97,13 +97,17 @@ offline/, tools/        создаются скриптами, не хранят
 | Поставка | `mvn -B -o -Pdist -Dmaven.repo.local=offline/m2 verify` | Появляется в T8.01; подготовка тогда запускается с `-Pdist,ui` |
 | Обычная работа | `mvn -B -pl server -am test -Dtest=ИмяТеста` | `~/.m2`, родитель задаёт `surefire.failIfNoSpecifiedTests=false` |
 
-Enforcer: `requireJavaVersion [21,)`, `requireMavenVersion [3.9,4)`. Двоичные файлы PostgreSQL для тестов разрешаются для всех платформ сразу, поэтому каталог `offline/m2`, подготовленный на macOS, содержит и Windows [ПОДТВ наличие файла; запуск на Windows ЧЕЛОВЕК].
+Enforcer: `requireJavaVersion [21,)`, `requireMavenVersion [3.9,4)`.
+
+**Платформы тестов с встроенным PostgreSQL:** Windows x86_64 (целевая) и Linux x86_64 (машина разработки). Двоичные файлы для них приходят транзитивно от `embedded-postgres:2.2.2` на любой машине, где запущен `prepare-offline`, поэтому `offline/m2`, подготовленный на Linux, содержит `windows-amd64` [ПОДТВ наличие файла; запуск на Windows ЧЕЛОВЕК]. Решение: arm64-варианты (`embedded-postgres-binaries-darwin-arm64v8`, `-linux-arm64v8`) не добавляются. Причина: ни целевая платформа, ни текущая машина разработки не arm64, а лишний артефакт только увеличивает комплект. Понадобится разработка на Apple Silicon или Linux arm64: запрос к `architect`, добавляется одна зависимость `test` с версией из BOM и повторяется `prepare-offline`. Работа `darwin-amd64` под Rosetta не подтверждена.
 
 Артефакты Spring Boot 4 разнесены по стартерам. Использовать: `spring-boot-starter-webmvc`, `-security`, `-validation`, `-jdbc`, `-flyway`; для тестов `-webmvc-test`, `-security-test`. Класс: `org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc` [ПОДТВ].
 
 Правила `pom.xml` (T1.01):
 - Свойство `pg.binaries.version=18.6.0` в корне; импорт `io.zonky.test.postgres:embedded-postgres-binaries-bom:${pg.binaries.version}` в `dependencyManagement` стоит до остальных импортов.
 - `server` получает `org.snmp4j:snmp4j` в области `compile` сразу в T1.01: модуль `snmp` (задача 4) не правит `pom.xml`. `poi-ooxml` вносит T7.01, `sqlite-jdbc` T2.02, Selenium T1.27.
+- Внешних адресов в `pom.xml` нет. `xsi:schemaLocation` и `xmlns:xsi` не пишутся, остаётся только `xmlns="http://maven.apache.org/POM/4.0.0"`: это имя пространства имён, а не адрес, Maven по нему не обращается. Репозитории и `pluginRepositories` в `pom.xml` не объявляются (используется Central по умолчанию, только в `prepare-offline`). Проверка механическая: в `pom.xml` нет `http://` и `https://` вне атрибута `xmlns`.
+- `emulators` в областях `compile`/`runtime` зависит только от `snmp4j` и `slf4j-simple`. В области `test` разрешены `org.junit.jupiter:junit-jupiter` и `org.assertj:assertj-core` без указания версии (берутся из BOM Spring Boot 4.1.2). Причина: `EmulatorMainTest` и тесты эмуляторов не собрать без JUnit, а `spring-boot-starter-test` тянул бы Spring в модуль без Spring. Другие тестовые зависимости в `emulators` только через `architect`.
 - Зависимость `server` от `nm-emulators` (область `test`) исключает `org.slf4j:slf4j-simple`: в `server` единственный провайдер SLF4J это Logback, иначе `LogCapture` не видит вывод.
 - Пароль, который Spring Security генерирует при отсутствии своего `UserDetailsService`, не должен попадать в лог (правило секретов). До T1.05 (свой `AppUserDetailsService`) автоконфигурация пользователя по умолчанию исключается; имя класса берётся из jar Spring Boot 4.1.2, не по памяти.
 
@@ -675,7 +679,7 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 
 ### 12.2 PostgreSQL в тестах
 
-`io.zonky.test:embedded-postgres` на один процесс JVM: класс `testsupport.TestPostgres` запускает сервер один раз (порт случайный, каталог временный) и сам реализует `ApplicationContextInitializer<ConfigurableApplicationContext>`, передавая `spring.datasource.url/username/password`. Подключение: `@ContextConfiguration(initializers = TestPostgres.class)` (в T1.01 прямо на `SmokeTest`, с T1.03 внутри `@IntegrationTest`). Первый запуск берёт двоичные файлы из артефакта Maven, поэтому интернет нужен только для `prepare-offline` [ПОДТВ на macOS; Windows ЧЕЛОВЕК]. Docker не нужен. Не запускать тесты от администратора Windows: `initdb` откажет [ЧЕЛОВЕК].
+`io.zonky.test:embedded-postgres` на один процесс JVM: класс `testsupport.TestPostgres` запускает сервер один раз (порт случайный, каталог временный) и сам реализует `ApplicationContextInitializer<ConfigurableApplicationContext>`, передавая `spring.datasource.url/username/password`. Подключение: `@ContextConfiguration(initializers = TestPostgres.class)` (в T1.01 прямо на `SmokeTest`, с T1.03 внутри `@IntegrationTest`). Первый запуск берёт двоичные файлы из артефакта Maven, поэтому интернет нужен только для `prepare-offline` [ПОДТВ на macOS x86_64 в пробном проекте; платформы §3; Windows ЧЕЛОВЕК]. Docker не нужен. Не запускать тесты от администратора Windows: `initdb` откажет [ЧЕЛОВЕК].
 
 Тестовые помощники (`server/src/test/java/ru/netmon/testsupport`; `TestPostgres` создаёт T1.01, остальные T1.03, далее только добавления через `architect`):
 
@@ -701,7 +705,7 @@ record ComponentHealth(String name, State state, String message, Map<String,Stri
 
 ### 12.5 Эмуляторы (OPS-11)
 
-Модуль `emulators`: зависит только от `snmp4j` и `slf4j-simple`. `java -jar emulators/target/nm-emulators-0.1.0-exec.jar <вид> [--ключ=значение]`; вид `tcp`, `hang`, `scpi`, `snmp`, `trap`. `EmulatorMain` (T1.01) ищет класс `ru.netmon.emulators.<вид>.Main`, поэтому новые виды не правят его файл. Контракт: `public static int run(String[] args)` возвращает код, `main` вызывает `System.exit(run(args))`; тесты вызывают только `run`. Вид допускается только по шаблону `[a-z]+`, иначе код 2 без загрузки класса. Неизвестный вид или пустые аргументы: сообщение в stderr и код выхода 2. Код вида-эмулятора: 0 при штатном завершении.
+Модуль `emulators`: в `compile`/`runtime` зависит только от `snmp4j` и `slf4j-simple`, в `test` только от `junit-jupiter` и `assertj-core` из BOM (§3). `java -jar emulators/target/nm-emulators-0.1.0-exec.jar <вид> [--ключ=значение]`; вид `tcp`, `hang`, `scpi`, `snmp`, `trap`. `EmulatorMain` (T1.01) ищет класс `ru.netmon.emulators.<вид>.Main`, поэтому новые виды не правят его файл. Контракт: `public static int run(String[] args)` возвращает код, `main` вызывает `System.exit(run(args))`; тесты вызывают только `run`. Класс вида `ru.netmon.emulators.<вид>.Main` тоже объявляет `public static int run(String[] args)`; `EmulatorMain.run` вызывает его с аргументами без первого и возвращает его код. У класса вида нет такого метода или он возвращает не `int`: сообщение в stderr и код 2. Исключение внутри вида: сообщение в stderr и код 1. Вид допускается только по шаблону `[a-z]+`, иначе код 2 без загрузки класса. Неизвестный вид или пустые аргументы: сообщение в stderr и код выхода 2. Код вида-эмулятора: 0 при штатном завершении.
 
 Каждый эмулятор также имеет класс с `start()`, `port()` и `close()` для запуска прямо из теста, порт `0` даёт случайный свободный. `server` подключает модуль только в области `test`. Данные SNMP берутся из файла в формате `oid = ТИП: значение`, значения тестовые и не считаются подтверждением.
 

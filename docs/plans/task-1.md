@@ -17,22 +17,23 @@
 **Цель:** многомодульный Maven-проект собирается, запускает пустое приложение на встроенном PostgreSQL в тесте и пересобирается без сети.
 **Исполнитель:** backend-core. **Зависит от:** нет.
 
-**Файлы:** `pom.xml`, `server/pom.xml`, `emulators/pom.xml`, `.gitignore`, `scripts/prepare-offline.sh`, `.ps1`, `scripts/offline-verify.sh`, `.ps1`, `S/NetMonitoringApplication.java`, `R/application.yml`, `server/src/test/resources/application-test.yml`, `T/testsupport/TestPostgres.java`, `T/SmokeTest.java`, `emulators/src/main/java/ru/netmon/emulators/EmulatorMain.java`, `emulators/src/test/java/ru/netmon/emulators/EmulatorMainTest.java`.
+**Файлы:** `pom.xml`, `server/pom.xml`, `emulators/pom.xml`, `.gitignore`, `scripts/prepare-offline.sh`, `.ps1`, `scripts/offline-verify.sh`, `.ps1`, `S/NetMonitoringApplication.java`, `R/application.yml`, `server/src/test/resources/application-test.yml`, `T/testsupport/TestPostgres.java`, `T/SmokeTest.java`, `emulators/src/main/java/ru/netmon/emulators/EmulatorMain.java`, `emulators/src/test/java/ru/netmon/emulators/EmulatorMainTest.java`, `emulators/src/test/java/ru/netmon/emulators/probe/Main.java`, `emulators/src/test/java/ru/netmon/emulators/voidprobe/Main.java`.
 
 **Контракты:** §1 версии, §2 структура, §3 сборка, §12.1, §12.2, §12.5, §13.
 
 **Шаги:**
+0. Во всех `pom.xml` корневой элемент `<project xmlns="http://maven.apache.org/POM/4.0.0">` без `xmlns:xsi` и `xsi:schemaLocation` (§3).
 1. Родитель `ru.netmon:nm-parent:0.1.0` (координаты §2): `spring-boot-starter-parent:4.1.2`, `java.version=21` (даёт `maven.compiler.release=21`), свойство `pg.binaries.version=18.6.0` и импорт BOM по §3, `surefire.failIfNoSpecifiedTests=false`, enforcer по §3, модули `emulators`, `server`.
 2. `server` (`nm-server`): стартеры и тестовые зависимости из §3, `flyway-database-postgresql`, `postgresql`, `snmp4j:3.9.7` (compile, §3), `embedded-postgres:2.2.2`, `archunit-junit5:1.5.1`, `nm-emulators` в области `test` с исключением `slf4j-simple`. Плагин `spring-boot-maven-plugin`. Сгенерированный пароль Spring Security не выводится (§3).
-3. `emulators` (`nm-emulators`): `snmp4j:3.9.7`, `slf4j-simple`, `spring-boot-maven-plugin` с `repackage`, `classifier=exec`, `mainClass=ru.netmon.emulators.EmulatorMain`.
-4. `EmulatorMain` по контракту §12.5: `int run(String[])`, первый аргумент вид по шаблону `[a-z]+`, загрузка `ru.netmon.emulators.<вид>.Main` через reflection, вызов `main(args без первого)`. Без аргумента, с недопустимым или неизвестным видом: сообщение и код 2.
+3. `emulators` (`nm-emulators`): `snmp4j:3.9.7`, `slf4j-simple`; в области `test` `junit-jupiter` и `assertj-core` без версии (BOM, §3); `spring-boot-maven-plugin` с `repackage`, `classifier=exec`, `mainClass=ru.netmon.emulators.EmulatorMain`.
+4. `EmulatorMain` по контракту §12.5: `int run(String[])`, первый аргумент вид по шаблону `[a-z]+`, загрузка `ru.netmon.emulators.<вид>.Main` через reflection, вызов его `public static int run(String[])` с аргументами без первого, возврат его кода. Без аргумента, с недопустимым или неизвестным видом, у вида нет `int run(String[])`: сообщение в stderr и код 2; исключение внутри вида: код 1.
 5. `TestPostgres` по §12.2; `SmokeTest`: `@SpringBootTest`, `@ActiveProfiles("test")`, `@ContextConfiguration(initializers = TestPostgres.class)`.
 6. `prepare-offline`: `mvn -B -Dmaven.repo.local=offline/m2 verify`. `offline-verify`: проверяет наличие `offline/m2/io/zonky/test/postgres/embedded-postgres-binaries-windows-amd64`, затем `mvn -B -o -Dmaven.repo.local=offline/m2 verify`. Скрипты находят корень проекта от своего положения.
 7. `.gitignore`: `target/`, `offline/`, `tools/`, `data/`, `*.log`.
 
 **Обязательные тесты:**
 - `SmokeTest`: контекст поднимается, `select version()` начинается с `PostgreSQL 18`; в выводе (`OutputCaptureExtension`) нет `generated security password`.
-- `EmulatorMainTest`: неизвестный вид и пустые аргументы дают код 2; разбор имени не выполняет произвольный класс с точками в имени (негативный случай `a.b`, код 2); проверка через `run`, без `System.exit`.
+- `EmulatorMainTest`: неизвестный вид и пустые аргументы дают код 2; разбор имени не выполняет произвольный класс с точками в имени (негативный случай `a.b`, код 2); тестовый вид `probe` (`int run(String[])`) получает аргументы без первого, и его код возвращается; тестовый вид `voidprobe` (`void run(String[])`) даёт код 2; проверка через `run`, без `System.exit`.
 
 **Команда проверки:** `scripts/prepare-offline.sh && scripts/offline-verify.sh`
 
