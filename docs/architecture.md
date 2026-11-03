@@ -89,7 +89,7 @@ offline/, tools/        создаются скриптами, не хранят
 - П. 1: собственное `ArchCondition<JavaClass>` на `classes().that().resideInAPackage("ru.netmon.*..")`: каждая прямая зависимость (`getDirectDependenciesFromSelf()`, тип цели через `getBaseComponentType()`) на класс из `ru.netmon` или `ru.netmon..` ведёт в модуль `contract`, `common` или собственный. Внешние библиотеки правилом 1 не ограничены.
 - П. 2: `classes().that().resideInAPackage("ru.netmon.contract..").should().onlyDependOnClassesThat().resideInAnyPackage("java..", "ru.netmon.contract..")`.
 - П. 3, два правила с `allowEmptyShould(true)`: классы, мета-аннотированные `@Controller`, лежат в `ru.netmon.*..` вне `ru.netmon.contract..` и `ru.netmon.common..`; методы, объявленные в таких классах и мета-аннотированные `@RequestMapping`, аннотированы `@PreAuthorize` на самом методе. Публичный метод (§5.1) несёт `@PreAuthorize("permitAll()")`; что именно эти методы и только они публичны, проверяет `SecurityMatrixTest` (T1.26). Причина: правило ArchUnit не сопоставляет пути, а отдельный список имён методов в тесте пришлось бы править каждой задаче.
-- П. 4 не выразим в ArchUnit (литералы строк в теле метода он не импортирует): обычный метод `@Test` в том же классе читает все файлы под `server/src/main` (рабочий каталог Surefire `server/`, путь `src/main`), кроме `src/main/resources/seed/`, и ищет подстроку `1.3.6.1` без регулярного выражения. Модуль `emulators` не проверяется.
+- П. 4 не выразим в ArchUnit (литералы строк в теле метода он не импортирует): обычный метод `@Test` в том же классе читает все файлы под `server/src/main` (рабочий каталог Surefire `server/`, путь `src/main`), кроме `src/main/resources/seed/`, и ищет подстроку `1.3.6.1` без регулярного выражения. Файл читается байтами и декодируется ISO-8859-1 (любой байт допустим), поэтому двоичные ресурсы (`alarm.wav`, изображения Leaflet) проверяются и не роняют тест; ошибка ввода-вывода не перехватывается и роняет тест с исключением, а не засчитывается как нарушение. Модуль `emulators` не проверяется.
 
 Модуль пишет только в свои таблицы. Чтение чужих таблиц SQL-запросом разрешено только там, где это явно указано в карточке (сводка, карточка устройства, отчёты), запись запрещена.
 
@@ -493,9 +493,9 @@ record TrapMatch(long deviceId, long ruleId, String trapOid, TrapAction action, 
 enum TrapAction { EVENT, ALARM, CLOSE }
 
 sealed interface SnmpCredentials { 
-  record V2c(String community) implements SnmpCredentials { /* toString без значения */ }
+  record V2c(String community) implements SnmpCredentials { /* toString: V2c[community=***] */ }
   record V3(String user, String authProtocol, String authPassword, String privProtocol, String privPassword)
-      implements SnmpCredentials { /* toString без значения */ }
+      implements SnmpCredentials { /* toString: все пять полей ***, включая user */ }
 }
 
 // Поля по §5.4 (устройство), §5.3 (фильтр), §9.1 (профиль), столбцам check_state (CheckView), §8.2.
@@ -522,11 +522,13 @@ record StatusInput(boolean monitoringEnabled, List<CheckView> checks, boolean ac
 record Actor(long userId, String login) {}
 
 record ComponentHealth(String name, State state, String message, Map<String,String> details) {
-  enum State { UP, DEGRADED, DOWN } }
+  public enum State { UP, DEGRADED, DOWN } }
 ```
 
 Правила переноса (проверено компиляцией на Java 21 и прогоном `ArchitectureTest` в прототипе):
 - Каждый тип верхнего уровня из §7.1 и §7.2 в своём файле `ru.netmon.contract.<Имя>.java` с модификатором `public`; импорты только `java.*`. Вложенными остаются только `SnmpCredentials.V2c`, `SnmpCredentials.V3`, `ComponentHealth.State` и `DeviceChanged.ChangeType`; другие группировки по классам-держателям не делаются, имена типов как в §7. Итого 46 файлов в `contract` и 5 в `contract.events`.
+- Вложенные типы в записях объявляются `public` (`ComponentHealth.State`, `DeviceChanged.ChangeType`): член записи без модификатора доступен только пакету `contract`. В интерфейсах (`SnmpCredentials.V2c`, `V3`) модификатор не нужен.
+- `toString` секретных типов маскирует каждое поле, а не только пароли: `V2c[community=***]`, `V3[user=***, authProtocol=***, authPassword=***, privProtocol=***, privPassword=***]`. Причина: имя USM-пользователя вместе с протоколами облегчает подбор, а диагностике `toString` не нужен; одно правило проще проверить.
 - `DeviceInput.ip` строка: формат §5.4 проверяет `device`, разбор строки в `InetAddress` по имени хоста дал бы обращение к DNS. Обёртки (`Long`, `Boolean`) в `DeviceInput` означают «поле не передано», ошибку обязательного поля даёт проверка `device`.
 - `DeviceFilter`: пустое множество или `null` значит «без ограничения». `ProfileView` без `unconfirmedNote` и `source`: они нужны только API профилей внутри `profile`.
 - `CheckView.lastError` равен `null` при успехе. `Actor.userId` примитив: системного актора нет (§7.2).
@@ -731,10 +733,10 @@ public record SettingChanged(String key, String value) {}
 | Класс | Назначение |
 |---|---|
 | `@IntegrationTest` | Мета-аннотация: `@SpringBootTest`, `@AutoConfigureMockMvc`, `@ActiveProfiles("test")`, `@ContextConfiguration(initializers = TestPostgres.class)`, `@Import({MutableClock.Config.class, TestDb.class, TestData.class, Api.class})`, `@ExtendWith(TestDb.CleanBeforeEach.class)` |
-| `TestDb` | Бин с `JdbcClient`. `clean()`: одной командой `TRUNCATE` всех таблиц схемы `public` из `pg_class` (`relkind in ('r','p') and not relispartition`), кроме `flyway_schema_history`, включая `system_setting`, без `CASCADE` и без `RESTART IDENTITY`, затем дословно `INSERT` шести строк `system_setting` из §4.2. `restoreSettings()`: `delete from system_setting` и тот же `INSERT`. Вложенный `CleanBeforeEach implements BeforeEachCallback` берёт бин через `SpringExtension.getApplicationContext(context)` и вызывает `clean()` |
-| `TestData` | Бин с `JdbcClient`, построители строк прямым SQL с уникальными значениями: пользователь, тип, группа, профиль, проверка, устройство; возвращают `id` |
+| `TestDb` | Бин с `JdbcClient`. `clean()`: одной командой `TRUNCATE` всех таблиц схемы `public` из `pg_class` (`relkind in ('r','p') and not relispartition`), кроме `flyway_schema_history`, включая `system_setting`, без `CASCADE` и без `RESTART IDENTITY`, затем `INSERT` шести строк `system_setting` из §4.2 с теми же ключами, значениями и порядком строк (форматирование SQL, переводы строк и `;` не важны). `restoreSettings()`: `delete from system_setting` и тот же `INSERT`. Вложенный `CleanBeforeEach implements BeforeEachCallback` берёт бин через `SpringExtension.getApplicationContext(context)` и вызывает `clean()` |
+| `TestData` | Бин с `JdbcClient`, построители строк прямым SQL с уникальными значениями: пользователь, тип, группа, профиль, проверка, устройство; возвращают `id`. Статический `ip()`: уникальный на процесс IPv4 из `10.0.0.0/8` (счётчик `AtomicInteger`) для построителя устройства и тестов |
 | `MutableClock` | `final class MutableClock extends Clock`, зона UTC, начальное значение `Instant.now()` с точностью до микросекунд, `set(Instant)`, `advance(Duration)`. Вложенный `@TestConfiguration(proxyBeanMethods = false) Config` с `@Bean @Primary MutableClock mutableClock()` |
-| `Api` | Бин с `MockMvc`: `api.as(Role.ADMIN).get/post/put/patch/delete(...)` возвращает `ResultActions`; `SecurityMockMvcRequestPostProcessors.user(...)` с ролью и `csrf()` на каждом запросе. Тип principal меняет T1.05 вместе с `Api` |
+| `Api` | Бин с `MockMvc`: `api.as(Role.ADMIN).get/post/put/patch/delete(...)` возвращает `ResultActions`; `as(Role)` отдаёт вложенный `public final class As`, `post/put/patch` принимают тело строкой JSON (`application/json`); `SecurityMockMvcRequestPostProcessors.user(...)` с ролью и `csrf()` на каждом запросе. Тип principal меняет T1.05 вместе с `Api` |
 | `LogCapture` | JUnit-расширение (`@RegisterExtension`): `text()` отдаёт всё, что записал Logback с начала метода. Appender `LogCapture.Appender` подключён в `server/src/test/resources/logback-test.xml` вместе с `CONSOLE` из `defaults.xml` и `console-appender.xml` Spring Boot и пишет в статический буфер JVM |
 | `RestartableApp` | `AutoCloseable`: `new RestartableApp(Map<String,String> extraProperties, Class<?>... extraSources)`, `start()`, `stop()`, `restart()`, `port()`, `context()`. `SpringApplicationBuilder(NetMonitoringApplication.class, extraSources...)`, профиль `test`; свойства `TestPostgres.properties()`, затем `extraProperties` и `server.port=0` передаются аргументами `run("--ключ=значение", ...)`. Ошибка запуска выходит исключением из `start()`. `MutableClock` только если тест передал `MutableClock.Config.class` |
 

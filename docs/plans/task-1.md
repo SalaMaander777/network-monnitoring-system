@@ -109,7 +109,7 @@
 
 **Шаги:**
 1. Перенести сигнатуры §7.1 и §7.2 (интерфейсы и события) без изменений, по правилам переноса §7.1. `ClockConfig` по §12.2 («Решения по помощникам»).
-2. Для `SnmpCredentials.V2c` и `V3` переопределить `toString`, значения заменяются на `***`.
+2. Для `SnmpCredentials.V2c` и `V3` переопределить `toString`, значения всех полей (у `V3` все пять, включая `user` и протоколы) заменяются на `***`, формат по правилам переноса §7.1.
 3. `SeqStreamPublisher`: возрастающий `seq`, `publish` ничего не отправляет. Реализует `StreamPublisher`.
 4. `ArchitectureTest` с правилами §2.2 пунктов 1–4 в формулировке §2.2 («Формулировка в `ArchitectureTest`»): пункты 1–3 как `@ArchTest`, пункт 4 как `@Test` в том же классе. Оба правила пункта 3 с `allowEmptyShould(true)`: контроллеров пока нет.
 5. Помощники по таблице и решениям §12.2, включая `logback-test.xml`. `Api` использует `SecurityMockMvcRequestPostProcessors.user(...)` и `csrf()`. `RestartableApp` запускает реальный Tomcat на случайном порту, свойства передаёт аргументами командной строки.
@@ -118,7 +118,7 @@
    1. Заменить `@SpringBootTest`, `@ActiveProfiles`, `@ContextConfiguration` на `@IntegrationTest`: очистка `TestDb` перед каждым методом убирает зависимость от данных и настроек других классов. Запрет `@Transactional` сохраняется.
    2. `defaultSettings`: читать `key, value` из `system_setting where key in (...)` по шести ключам §4.2 и сверять эти шесть пар; не сравнивать всю таблицу. Причина: набор ключей расширяется только миграциями, а сверка всей таблицы ломается от лишней строки, не относящейся к тесту.
    3. `tablesAndDefaultPartition`: `relkind` читать по `'public.check_result'::regclass` (`select relkind::text from pg_class where oid = 'public.check_result'::regclass`), без поиска по `relname` без схемы.
-   4. `tablesAndDefaultPartition`: вставленную строку `check_result` удалить в `finally` того же метода (`delete from check_result where device_id=? and check_id=?`, число строк 1). Причина: по POLL-09 строка в `check_result_default` означает сбой, тесты разделов и здоровья задачи 3 не должны её видеть.
+   4. `tablesAndDefaultPartition`: вставленную строку `check_result` удалить в `finally` того же метода (`delete from check_result where device_id=? and check_id=?`). Число удалённых строк сохранить в `finally` и сверять с 1 после блока `try/finally`, а не в `finally`: иначе провал проверки перекроет исходную ошибку `INSERT`. Причина: по POLL-09 строка в `check_result_default` означает сбой, тесты разделов и здоровья задачи 3 не должны её видеть.
    5. Проверка нарушения: перед `getServerErrorMessage().getConstraint()` утверждать `getServerErrorMessage()` не `null` с сообщением, содержащим SQL; так вместо NPE тест падает с понятной причиной.
    6. Каждый `update` подготовки (мягкое удаление устройства, закрытие тревоги и другие `UPDATE`) сверять с числом строк 1: `assertThat(...update()).isEqualTo(1)`.
 
