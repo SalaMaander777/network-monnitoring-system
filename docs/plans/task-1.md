@@ -148,7 +148,7 @@
 **Цель:** все ошибки и постраничные ответы API имеют единый формат без утечки внутренностей (основа DEV-03 «понятное сообщение» и DEV-05 «постраничный вывод, сортировка»).
 **Исполнитель:** backend-core. **Зависит от:** T1.03.
 
-**Файлы:** `S/common/web/FieldError.java`, `ApiException.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`; `T/common/ApiErrorsTest.java`, `T/common/PageQueryTest.java`; `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, §12.2 «Тестовые контроллеры и бины»); по шагам «Тестовые помощники»: `T/testsupport/TestDb.java`, `T/testsupport/MutableClock.java`, `T/testsupport/TestDbSelfTest.java`.
+**Файлы:** `S/common/web/FieldError.java`, `ApiException.java`, `ApiErrorHandler.java`, `PageQuery.java`, `PageResponse.java`; `T/common/ApiErrorsTest.java`, `T/common/PageQueryTest.java`, `T/common/ApiErrorsQaTest.java` (независимая проверка QA); `server/src/test/java/nmtest/common/ErrorsTestController.java` (тестовый контроллер вне `ru.netmon`, §12.2 «Тестовые контроллеры и бины»); по шагам «Тестовые помощники»: `T/testsupport/TestDb.java`, `T/testsupport/MutableClock.java`, `T/testsupport/TestDbSelfTest.java`.
 
 **Контракты:** §5.1 (в том числе «Реализация в `ru.netmon.common.web`»), §2.2, §12.2, §14.
 
@@ -189,10 +189,16 @@
 - `ApiErrorsTest.accessDeniedGoesToSecurity`: `/denied` 403 (ответ фильтра безопасности), тело не содержит `INTERNAL_ERROR`.
 - `ApiErrorsTest.pageLimits`: `size` `0`, `501`, `-1`, `abc`, пустой и `page=-1`, `page=abc` дают 400 `VALIDATION_FAILED` с полем `size` или `page`; `size=500` 200 и `"size":500`; без параметров 200 `{"items":["name asc"],"page":0,"size":50,"total":0}`; `page=2147483647&size=500` 200.
 - `ApiErrorsTest.sortWhitelist`: `sort=foo`, `sort=name;drop table device`, `sort=name,ASC`, `sort=name,asc,x`, `sort=name&sort=createdAt` дают 400 с полем `sort`; `sort=createdAt,desc` даёт `items[0]` = `created_at desc`, `sort=name` даёт `name asc`.
-- `PageQueryTest` (без Spring): умолчания; `offset()` при `page=Integer.MAX_VALUE`, `size=500` равен `2147483647L * 500` без переполнения; `page=-1&size=0&sort=foo` дают одну `ApiException` с тремя полями; `+5` и ` 5` неверны; неверный `defaultSort` даёт `IllegalArgumentException`; `ApiException` с ключом `code` в `details` даёт `IllegalArgumentException`.
+- `PageQueryTest` (без Spring): умолчания; `offset()` при `page=Integer.MAX_VALUE`, `size=500` равен `2147483647L * 500` без переполнения; `page=-1&size=0&sort=foo` дают одну `ApiException` с тремя полями; `+5` и ` 5` неверны; неверный `defaultSort` даёт `IllegalArgumentException` и при заданном верном `sort` (`defaultSort` проверяется всегда, §5.1); `null` в `defaultSort` не тестируется (§5.1); `ApiException` с ключом `code` в `details` даёт `IllegalArgumentException`.
+- `ApiErrorsQaTest` (добавлен qa-verifier как независимая проверка; тот же `@IntegrationTest` и `@Import(ErrorsTestController.class)`, без изменений тестового контроллера). Закрывает то, чего нет в `ApiErrorsTest`:
+  - `literalMessagesAndContentType`: буквальные тела по таблице §5.1: `VALIDATION_FAILED` «Проверьте введённые данные» для `POST /body` и `GET /checked` (начало тела, `fields` массив); целиком `BAD_JSON`, `BAD_PARAMETER` (с полем `n` «Неверное значение»), `DATA_CONFLICT`, `INTERNAL_ERROR`, Spring 404 `NOT_FOUND` и 405 `METHOD_NOT_ALLOWED` с «Запрос не может быть выполнен»; порядок `code`, `message`, `fields`, затем `devices` у `PROFILE_IN_USE`; `Content-Type` начинается с `application/json`.
+  - `missingBodyAndMissingParam`: `POST /body` без тела 400 `BAD_JSON`; `GET /typed` без `n` 400 `BAD_REQUEST` (строка `ErrorResponse` 4xx) с пустым `fields`.
+  - `leakFreeValidation`: `sort=<маркер>` 400 `VALIDATION_FAILED` «Проверьте параметры запроса», поле «Недопустимая сортировка»; в теле нет маркера, выражения SQL `created_at`, неверного направления `bad`, значения `foo`; `page=-1&size=0&sort=foo` даёт три поля.
+  - `strictParsingOverHttp`: через HTTP 400 для `+5` и ` 5` в `page`/`size`, пустых `page`, `size`, `sort`, `name,`, `,asc`, `Name`, `name,desc,`, `name ` (с пробелом), `0500x`, `page=99999999999`, повторов `sort` и `page`; `sort=name,asc` 200.
+  - `pageBeyondLastIsOkAndEmptyItemsContract`: `page=1000&size=10` 200, `page` 1000, `size` 10, `total` 0 (содержимое `items` не проверяет: тестовый контроллер возвращает `orderBy()`).
 - `TestDbSelfTest`: зелёный с проверками шагов помощников 1–4 (`cleanFailsFastOnLockedTable`, `clockZoneEquality`, `truncateTargetsQualified`); в отчёте показать, что при временно выключенном `lock_timeout` (`set local lock_timeout = 0` в `clean()`) метод `cleanFailsFastOnLockedTable` падает с `TimeoutException` примерно за 30 с и прогон завершается, затем вернуть `'5s'`.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,PageQueryTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='ApiErrorsTest,ApiErrorsQaTest,PageQueryTest,ArchitectureTest,TestDbSelfTest,SchemaConstraintsTest'`
 
 **Критерии готовности:** всё зелёное, тело ошибки соответствует примеру и таблице §5.1.
 
