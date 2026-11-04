@@ -10,7 +10,7 @@
 
 **Постраничные ресурсы (с T1.04, круг 1 ревью):** `ORDER BY` строится только из `PageQuery.orderBy(tieBreaker)` с уникальным столбцом (`id`) и подставляется как есть, `LIMIT ?`/`OFFSET ?` параметрами из `size()` и `offset()`. Обязательный тест каждого постраничного эндпоинта: не меньше трёх записей с одинаковым значением поля сортировки, `size=1` (или меньше их числа), обход всех страниц даёт каждую запись ровно один раз; страница за последней 200 с пустым `items` и настоящим `total`.
 
-**Тела запросов и ограничения (с T1.05, повторное ревью T1.04 Н-а, Н-е):** тело `@RequestBody` верхнего уровня всегда объект JSON, не коллекция, не `Map` и не массив (§2.2 п. 5, проверяет `ArchitectureTest`); списки передаются полем объекта. Кросс-параметрическое ограничение метода контроллера допускается только с явным `message` на русском; его ошибка приходит с `field: null` (§5.1). Правки `ApiErrorHandler` после T1.04 делают только карточки, где это прямо записано (T1.05, T1.24).
+**Тела запросов и ограничения (с T1.05, повторное ревью T1.04 Н-а, Н-е):** тело `@RequestBody` верхнего уровня всегда объект JSON, не коллекция, не `Map` и не массив (§2.2 п. 5, проверяет `ArchitectureTest`); списки передаются полем объекта. Кросс-параметрическое ограничение Bean Validation на методе контроллера запрещено: Spring 7.0.10 его без нарушения ограничения параметра не применяет (проверено прототипом T1.05, §5.1); совместная проверка параметров пишется кодом через `ApiException.validation(...)`, ошибка уровня запроса с `field: null`. Правки `ApiErrorHandler` после T1.04 делают только карточки, где это прямо записано (T1.05, T1.24).
 
 **Обозначение пути:** `S/` = `server/src/main/java/ru/netmon/`, `T/` = `server/src/test/java/ru/netmon/`, `R/` = `server/src/main/resources/`.
 
@@ -226,36 +226,55 @@
 ## T1.05. Вход, выход и защита по умолчанию
 
 **Цель:** без сессии недоступно ничего, кроме страницы входа; пользователь входит по логину и паролю из БД с BCrypt.
-**Исполнитель:** backend-core. **Зависит от:** T1.04.
+**Исполнитель:** backend-core. **Зависит от:** T1.04. **Фичи:** AUTH-01, AUTH-02, AUTH-07 (выход), SEC-05 (CSRF).
 
-**Файлы:** `S/auth/SecurityConfig.java`, `AppUserRepository.java`, `AppUserDetailsService.java`, `JsonAuthHandlers.java`, `MeController.java`, `S/common/web/ApiErrorController.java`, `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `T/common/ErrorPageTest.java`, `server/src/test/java/nmtest/common/FailingFilter.java`, `server/src/test/resources/security-matrix/auth.csv`; по шагу 6: правка `S/common/web/ApiErrorHandler.java`, `T/ArchitectureTest.java`, `T/common/ApiErrorsTest.java`, новые `server/src/test/java/nmtest/common/ErrorsExtraTestController.java` и `nmtest/common/OrderedRange.java` (тестовое кросс-параметрическое ограничение с валидатором; `ErrorsTestController` и `ApiErrorsQaTest` не правятся); временный `R/static/login.html` не создаётся, его делает T1.28.
+**Файлы:**
+- Новые в `main`: `S/auth/SecurityConfig.java`, `S/auth/AppUserRepository.java`, `S/auth/AppUserDetailsService.java`, `S/auth/JsonAuthHandlers.java`, `S/auth/AuthController.java` (`GET /api/auth/csrf`), `S/auth/MeController.java` (`GET /api/me`), `S/common/security/CurrentUser.java`, `S/common/web/ApiErrorController.java`.
+- Правки в `main`: `R/application.yml` (только три свойства `server.servlet.session.*` из §5.1), `S/common/web/ApiErrorHandler.java` (только шаг 6).
+- Тесты: новые `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `T/common/ErrorPageTest.java`, `server/src/test/java/nmtest/common/FailingFilter.java`, `nmtest/common/ErrorsExtraTestController.java`, `nmtest/common/OrderedRange.java` (аннотация с вложенным `Validator`), `nmtest/arch/ListBodyController.java`, `server/src/test/resources/security-matrix/auth.csv`; правки `T/testsupport/Api.java` (§12.2), `T/ArchitectureTest.java`, `T/common/ApiErrorsTest.java`.
+- Не правятся: `NetMonitoringApplication.java`, `ErrorsTestController.java`, `ApiErrorsQaTest.java`, `SmokeTest.java`, прочие помощники `T/testsupport/`. `R/static/login.html` не создаётся, его делает T1.28.
 
-**Контракты:** §5.1, §5.2 (auth, me), §12.3.
+**Контракты:** §5.1 (в том числе блок «Безопасность»), §5.2 (auth, me), §2.2 п. 3 и п. 5, §12.2 (`Api`), §12.3.
 
 **Шаги:**
-1. `SecurityFilterChain`: `formLogin` с `loginProcessingUrl=/api/auth/login`, обработчики JSON, `logoutUrl=/api/auth/logout`, CSRF по §5.1, `@EnableMethodSecurity`, запрет всего, кроме публичного списка §5.1. Для `/api/**` без сессии 401 JSON, иначе перенаправление.
-2. `BCryptPasswordEncoder` стойкостью 10. `DaoAuthenticationProvider` с проверкой `active`.
-3. `GET /api/auth/csrf`, `GET /api/me`.
-4. Заполнить `auth.csv` эндпоинтами этой карточки.
-5. (из ревью T1.04, Н4) `ApiErrorController` по абзацу §5.1 под таблицей: реализует `ErrorController` Spring Boot (пакет интерфейса взять из версии Spring Boot §1, проверить по классам в `~/.m2`), один метод на `/error` для всех методов HTTP, ответ `ResponseEntity` JSON. Функция кода 4xx выносится из `ApiErrorHandler` в общую пакетную статическую функцию без изменения поведения. В `SecurityConfig` диспетчеризация `DispatcherType.ERROR` разрешена (`dispatcherTypeMatchers(ERROR).permitAll()`), иначе ответ `/error` снова проходит проверку сессии. Свойства `server.error.*` не задаются. При `response.isCommitted()` (Tomcat делает `include` страницы ошибки в начатый ответ) `ApiErrorController` тело не пишет и в лог не пишет (§5.1, абзац под таблицей).
-6. (повторное ревью T1.04, Н-а, Н-д, Н-е, Н-ж) Доработка `ApiErrorHandler` и правил по §5.1 и §2.2: (а) правило §2.2 п. 5 в `ArchitectureTest` (тело верхнего уровня не коллекция); (б) для `ErrorResponse` 4xx заголовки `getHeaders()` копируются в ответ, кроме `Content-Type` и `Content-Length`; (в) `getCrossParameterValidationResults()` дают поля `field=null` с `getDefaultMessage()` после ошибок параметров. Остальное поведение `ApiErrorHandler` не меняется.
+1. `SecurityConfig`, `JsonAuthHandlers` и cookie сессии строго по блоку «Безопасность» §5.1 (цепочка, коды и тексты ответов, запись JSON байтами, обновление `XSRF-TOKEN` после входа).
+2. `CurrentUser` по §5.1. `AppUserRepository.findByLogin(String)` (`JdbcClient`, одна выборка `id, login, role, active, password_hash`); `AppUserDetailsService` отдаёт `CurrentUser` или бросает `UsernameNotFoundException`. Проверка `active` через `isEnabled()`.
+3. `AuthController.csrf` (`@PreAuthorize("permitAll()")`, 204) и `MeController.me` (`hasAnyRole('OPERATOR','ADMIN')`, `@AuthenticationPrincipal CurrentUser`, тело `{"id","login","role"}` в этом порядке).
+4. `Api` по §12.2: principal `CurrentUser` вместо `user(...)`, `csrf()` остаётся.
+5. `auth.csv`: заголовок `метод,путь,OPERATOR,ADMIN,ANON` и ровно две строки `GET,/api/auth/csrf,allow,allow,public` и `GET,/api/me,allow,allow,deny` (§12.3: вход и выход в матрицу не входят).
+6. (ревью T1.04, Н4) `ApiErrorController` по абзацу §5.1 под таблицей. При `response.isCommitted()` тело и лог не пишутся (`return null`). Свойства `server.error.*` не задаются. В `ArchitectureTest` оба правила п. 3 получают отбор этого класса по §2.2.
+7. (повторное ревью T1.04, Н-а, Н-д, Н-е, Н-ж) `ApiErrorHandler`: (а) правило §2.2 п. 5 в `ArchitectureTest` полем `@ArchTest static final ArchRule objectBody`; (б) для `ErrorResponse` 4xx заголовки `getHeaders()` копируются в ответ, кроме `Content-Type` и `Content-Length` (в Spring 7 `HttpHeaders` не `Map`: обход `forEach((name, values) -> …)`, сравнение имён без учёта регистра); (в) `getCrossParameterValidationResults()` дают `field=null` и `getDefaultMessage()` после ошибок параметров. Остальное поведение `ApiErrorHandler` не меняется.
 
-**Обязательные тесты:**
-- AUTH-01: 401 на `/api/me` и любой другой путь `/api/**`; статический `/index.html` без сессии перенаправляется на вход; `/login.html` доступен (404 здесь не считается отказом доступа).
-- Верный вход: 200 и `{login,role}`; неверный пароль, неизвестный логин и отключённый пользователь дают одинаковый 401 `AUTH_FAILED`.
-- AUTH-02: в `app_user.password_hash` значение с префиксом BCrypt, открытый пароль в таблице не найден поиском по всем её столбцам.
-- Выход: после `POST /api/auth/logout` прежняя сессия получает 401.
-- Сессия меняется при входе (защита от фиксации).
-- SEC-05 CSRF: POST без `X-XSRF-TOKEN` даёт 403; с верным токеном проходит; с чужим 403.
-- Пустой логин, логин 1000 символов: 401 без 500.
-- `ErrorPageTest` (Н4 ревью T1.04). `MockMvc` не выполняет переадресацию на `/error`, поэтому: (1) `GET /error` с атрибутами запроса `jakarta.servlet.error.status_code` = 500 и `jakarta.servlet.error.exception` = `IllegalStateException(<маркер>)` даёт 500 и тело ровно `{"code":"INTERNAL_ERROR","message":"Внутренняя ошибка сервера","fields":[]}`, маркер в логе есть, в теле нет; статус 404 даёт `NOT_FOUND`, 413 `PAYLOAD_TOO_LARGE`; (2) `RestartableApp` с `extraSources` `nmtest.common.FailingFilter` (`OncePerRequestFilter`, на пути `/api/test-filter-fail` бросает `IllegalStateException(<маркер>)`, иначе пропускает) и `java.net.http.HttpClient` на `http://127.0.0.1:<port>`: ответ 500, тело по §5.1 `INTERNAL_ERROR`, без маркера и без `timestamp`, `trace`, `exception`.
-- Шаг 6 (`ApiErrorsTest`, `ErrorsExtraTestController` на путях `/api/test-errors-extra/**`): 405 (`DELETE` на путь только с `GET`) несёт `Allow` со значением `GET` (и `HEAD`, если Spring его добавит; сверять, что `GET` есть, а `DELETE` нет), тело `METHOD_NOT_ALLOWED`; 415 (`POST` с `text/plain` на метод с `consumes = application/json`) несёт `Accept`, содержащий `application/json`, тело `UNSUPPORTED_MEDIA_TYPE`; `Content-Type` ответа в обоих случаях `application/json`. Кросс-параметрическое ограничение `@OrderedRange` (`from <= to` для двух `@RequestParam int`, `message` «Начало диапазона больше конца»): `from=5&to=1` даёт 400 `VALIDATION_FAILED`, `fields` ровно `[{"field":null,"message":"Начало диапазона больше конца"}]`; вместе с нарушением ограничения параметра (`@Min(0)` на `from`, `from=-1&to=-2`) поле параметра идёт первым. `ArchitectureTest`: правило п. 5 ловит нарушение на тестовом наборе классов (`ClassFileImporter` по классу-нарушителю в `nmtest`, метод `@PostMapping` с `@RequestBody List<String>`), на `ru.netmon` проходит. `pageLimits` дополняется `size=%205` (пробел, закодированный в URL) даёт 400 с полем `size` (ревью T1.04 Н-ж; разбор тот же, что у `page=%205`).
+**Обязательные тесты** (тело читать `getContentAsString(StandardCharsets.UTF_8)`; пользователи с паролем вставляются в тесте через `JdbcClient` и бин `PasswordEncoder`, `TestData` не меняется):
+- `LoginTest` (`@IntegrationTest`, `MockMvc`; вход формой с cookie и заголовком из `GET /api/auth/csrf`):
+  - `anonymousIsRejected` (AUTH-01): `GET /api/me` и `GET /api/no-such` без сессии дают 401 и тело ровно `{"code":"AUTH_REQUIRED","message":"Требуется вход в систему","fields":[]}`; `GET /index.html` даёт 302, `Location` оканчивается на `/login.html`; `GET /login.html` и `GET /login/x.js` не 401 и не 302 (404 допустим, файлов ещё нет); после анонимного запроса `getRequest().getSession(false)` равен `null`.
+  - `loginReturnsUser`: вход логином в другом регистре даёт 200 и тело ровно `{"login":<как в БД>,"role":"OPERATOR"}`; с полученной сессией `GET /api/me` даёт `{"id":…,"login":…,"role":…}`.
+  - `loginFailuresAreUniform`: неверный пароль, неизвестный логин, отключённый пользователь (`active=false`, верный пароль), пустые логин и пароль, логин 1000 символов: каждый 401 с телом ровно `{"code":"AUTH_FAILED","message":"Неверный логин или пароль","fields":[]}`, без 500.
+  - `passwordStoredAsBcrypt` (AUTH-02): `password_hash` своей строки начинается с `$2a$10$`; `select count(*) from app_user t where position(? in t::text) > 0` с открытым паролем параметром даёт 0.
+  - `logoutEndsSession` (AUTH-07): `POST /api/auth/logout` с сессией и токеном даёт 204, затем та же сессия на `GET /api/me` даёт 401.
+  - `sessionIdChangesOnLogin` (`RestartableApp` и `java.net.http.HttpClient`, cookie передаются заголовком `Cookie` вручную): `Set-Cookie` сессии после входа содержит `HttpOnly` и `SameSite=Lax`; повторный вход с этой сессией выдаёт другой `JSESSIONID`, прежний на `GET /api/me` даёт 401. `MockMvc` смену идентификатора не воспроизводит (`MockHttpSession` сохраняет id, проверено прототипом), поэтому только Tomcat.
+- `CsrfTest` (`@IntegrationTest`, `MockMvc`, SEC-05):
+  - `loginWithoutHeaderIs403`: вход с cookie `XSRF-TOKEN` без заголовка даёт 403 и тело ровно `{"code":"CSRF_INVALID","message":"Недействительный токен защиты, обновите страницу","fields":[]}`.
+  - `foreignTokenIs403`: cookie из одного `GET /api/auth/csrf`, заголовок из другого: 403 `CSRF_INVALID`; с совпадающими: 200.
+  - `loginRenewsToken`: в ответе входа последний `Set-Cookie` `XSRF-TOKEN` непустой и отличается от использованного; с ним `POST /api/auth/logout` даёт 204.
+  - `logoutWithoutTokenIs403`: с сессией без заголовка 403 `CSRF_INVALID`, сессия жива (`GET /api/me` 200).
+- `ErrorPageTest` (`@IntegrationTest`, Н4 ревью T1.04). `MockMvc` не переадресует на `/error`, а прямой запрос `/error` без сессии даёт 302, поэтому:
+  - `errorAttributesToApiFormat`: `GET /error` с `user(...)` и атрибутами `jakarta.servlet.error.status_code` = 500, `jakarta.servlet.error.exception` = `IllegalStateException(<маркер>)`, `jakarta.servlet.error.request_uri`: 500 и тело ровно `{"code":"INTERNAL_ERROR","message":"Внутренняя ошибка сервера","fields":[]}`, маркер в `LogCapture` есть, в теле нет; `GET` со статусом 404 даёт `NOT_FOUND`, 413 `PAYLOAD_TOO_LARGE` (через `POST` без CSRF прямой запрос получил бы 403).
+  - `filterExceptionGoesToErrorPage`: `RestartableApp` с `extraSources` `FailingFilter` (`OncePerRequestFilter` с `@Order(Ordered.HIGHEST_PRECEDENCE)`, то есть до Spring Security, иначе анонимный запрос получил бы 401; на пути `/api/test-filter-fail` бросает `IllegalStateException(<маркер>)`, иначе пропускает) и `HttpClient` на `http://127.0.0.1:<port>` без сессии: `GET` и `POST` дают 500, `Content-Type` `application/json`, тело ровно как выше (без маркера, `timestamp`, `trace`, `exception`), маркер в логе есть.
+- `ApiErrorsTest` (шаг 7; `@Import` дополняется `ErrorsExtraTestController`, пути `/api/test-errors-extra/**`, все методы `permitAll()`):
+  - `methodNotAllowedHasAllow`: `DELETE /get-only` (метод только `GET`) даёт 405 `METHOD_NOT_ALLOWED`, `Allow` содержит `GET` и не содержит `DELETE`.
+  - `unsupportedMediaTypeHasAccept`: `POST /json-only` (`consumes = application/json`, тело record `Payload(String name)`) с `text/plain` через `MockMvc` с `user(...)` и `csrf()` даёт 415 `UNSUPPORTED_MEDIA_TYPE`, `Accept` содержит `application/json`. `Content-Type` ответа в обоих случаях `application/json`.
+  - `crossParameterErrorsAfterParameterErrors`: `GET /range?from=-1&to=-2` (метод `@OrderedRange(message = "Начало диапазона больше конца")`, параметры `@RequestParam @Min(value = 0, message = "Не меньше 0") int from`, `@RequestParam int to`) даёт 400 `VALIDATION_FAILED`, `fields` ровно `[{"field":"from","message":"Не меньше 0"},{"field":null,"message":"Начало диапазона больше конца"}]`.
+  - `crossParameterAloneIsIgnoredBySpring`: `GET /range?from=5&to=1` даёт 200. Фиксирует причину запрета (§5.1); падение после обновления Spring сообщается `architect`.
+  - `pageLimits` дополняется `{"size=%205","size"}` (ревью T1.04 Н-ж).
+- `ArchitectureTest`: `objectBodyRuleCatchesCollectionBody`: `objectBody.evaluate(new ClassFileImporter().importClasses(ListBodyController.class)).hasViolation()` истинно (`@RestController`, `@PreAuthorize("permitAll()") @PostMapping` с `@RequestBody List<String>`), для `ErrorsTestController` ложно; на `ru.netmon` правило проходит.
+- Существующие тесты без правок остаются зелёными (проверено прототипом с `Api` на `CurrentUser`): `accessDeniedGoesToSecurity` теперь получает 403 `FORBIDDEN` JSON вместо пустого тела, `SmokeTest` не видит сгенерированного пароля.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginTest,CsrfTest,ErrorPageTest,ApiErrorsTest,ApiErrorsQaTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginTest,CsrfTest,ErrorPageTest,ApiErrorsTest,ApiErrorsQaTest,ArchitectureTest,SmokeTest,TestDbSelfTest'`
 
-**Критерии готовности:** тесты зелёные; `SecurityConfig` не содержит правил по отдельным ресурсам; в логах нет сгенерированного пароля Spring.
+**Критерии готовности:** тесты зелёные; `SecurityConfig` не содержит правил по отдельным ресурсам, кроме публичного списка §5.1; в логах нет сгенерированного пароля Spring; хэш пароля не попадает в ответы и `toString()` principal.
 
-**Запрещено:** правила `requestMatchers` по ресурсам вместо `@PreAuthorize`; блокировка (T1.09), срок сессии (T1.08).
+**Запрещено:** правила `requestMatchers` по ресурсам вместо `@PreAuthorize`; бин `DaoAuthenticationProvider`; блокировка (T1.09), срок сессии (T1.08).
 
 ---
 
@@ -839,7 +858,7 @@
 
 **Контракты:** раздел 7 ТЗ, §5.1, §5.2, §12.3.
 
-**Шаги:** инвентарь из `RequestMappingHandlerMapping`. Для каждой строки CSV и роли запрос с подставленными идентификаторами. `allow` значит не 401 и не 403 (404 и 400 допускаются), `deny` значит 403, `public` значит без сессии не 401. Без роли: 401 для всех непубличных.
+**Шаги:** инвентарь из `RequestMappingHandlerMapping`. Для каждой строки CSV и роли запрос с подставленными идентификаторами. `allow` значит не 401 и не 403 (404 и 400 допускаются), `deny` значит 403, `public` значит без сессии не 401. Без роли: 401 для всех непубличных. Инвентарь не включает `/error` (`ApiErrorController`), вход и выход не методы контроллеров (§12.3); правило 3 сохраняет отбор `ApiErrorController` (§2.2). Анонимный изменяющий запрос без токена получает 403 `CSRF_INVALID` раньше проверки сессии (§5.1), поэтому проверка «без роли» шлёт верный токен из `/api/auth/csrf`.
 
 **Обязательные тесты:**
 - AUTH-03: все эндпоинты задачи 1 трижды (дежурный, администратор, без входа).
