@@ -230,7 +230,7 @@
 
 **Файлы:**
 - Новые в `main`: `S/auth/SecurityConfig.java`, `S/auth/AppUserRepository.java`, `S/auth/AppUserDetailsService.java`, `S/auth/JsonAuthHandlers.java`, `S/auth/AuthController.java` (`GET /api/auth/csrf`), `S/auth/MeController.java` (`GET /api/me`), `S/common/security/CurrentUser.java`, `S/common/web/ApiErrorController.java`.
-- Правки в `main`: `R/application.yml` (только три свойства `server.servlet.session.*` из §5.1), `S/common/web/ApiErrorHandler.java` (только шаг 6).
+- Правки в `main`: `R/application.yml` (только три свойства `server.servlet.session.*` из §5.1), `S/common/web/ApiErrorHandler.java` (только шаги 6–7).
 - Тесты: новые `T/auth/LoginTest.java`, `T/auth/CsrfTest.java`, `T/common/ErrorPageTest.java`, `server/src/test/java/nmtest/common/FailingFilter.java`, `nmtest/common/ErrorsExtraTestController.java`, `nmtest/common/OrderedRange.java` (аннотация с вложенным `Validator`), `nmtest/arch/ListBodyController.java`, `server/src/test/resources/security-matrix/auth.csv`; правки `T/testsupport/Api.java` (§12.2), `T/ArchitectureTest.java`, `T/common/ApiErrorsTest.java`.
 - Не правятся: `NetMonitoringApplication.java`, `ErrorsTestController.java`, `ApiErrorsQaTest.java`, `SmokeTest.java`, прочие помощники `T/testsupport/`. `R/static/login.html` не создаётся, его делает T1.28.
 
@@ -280,27 +280,68 @@
 
 ## T1.06. Журнал действий и запись событий
 
-**Цель:** каждое изменение данных можно записать в журнал действий и журнал событий в той же транзакции и прочитать администратором.
-**Исполнитель:** backend-core. **Зависит от:** T1.05.
+**Цель:** каждое изменение данных записывается в журнал действий и журнал событий в транзакции изменения, без секретов, и читается администратором.
+**Исполнитель:** backend-core. **Зависит от:** T1.05. **Фичи:** LOG-04 (запись и чтение журнала действий), LOG-01 (запись события `USER_ACTION` и общий механизм записи событий; события статуса и трапов пишут T3.11, T4.14).
 
-**Файлы:** `S/audit/AuditLogService.java`, `AuditController.java`, `SecretFieldGuard.java`, `S/journal/EventJournalService.java`, `T/audit/AuditLogTest.java`, `T/journal/EventJournalWriteTest.java`, `security-matrix/audit.csv`.
+**Файлы:**
+- Новые в `main`: `S/common/json/SecretFieldGuard.java`, `S/audit/AuditLogService.java`, `S/audit/AuditRepository.java`, `S/audit/AuditEntry.java`, `S/audit/AuditController.java`, `S/journal/EventJournalService.java`.
+- Тесты: новые `T/common/SecretFieldGuardTest.java`, `T/audit/AuditLogTest.java`, `T/audit/AuditApiTest.java`, `T/journal/EventJournalWriteTest.java`, `server/src/test/resources/security-matrix/audit.csv`.
+- Не правятся: `contract/`, миграции, `SecurityConfig`, `ApiErrorHandler`, `CurrentUser`, помощники `T/testsupport/`, `auth.csv`, существующие тесты. Зависимости не добавляются (Jackson 3 и `spring-tx` уже есть).
 
-**Контракты:** §5.2 (`/api/audit`), §7.2 (`AuditLog`, `EventJournal`), §10.4.
+**Контракты:** §7.2 (`AuditLog`, `EventJournal`, абзац «Запись журналов»), §5.2 (`GET /api/audit`, абзац «Журнал действий и журнал событий»), §5.1 (`PageQuery`, ошибки), §4.2 (`audit_log`, `event`), §2.1, §2.2, §10.4, §12.2, §12.3, §14.
 
-**Шаги:** `AuditLog.record` сериализует старое и новое значения в JSON. `SecretFieldGuard` удаляет из значений поля с именами `password`, `community`, `authPassword`, `privPassword`, `passwordHash`, `ciphertext` на любой глубине. Запись `USER_ACTION` в `event`.
+**Решения (проверены прототипом в копии проекта, `-o`, полный `mvn -pl server -am test` зелёный вместе с прототипом):**
+- Запись в той же транзакции: `@Transactional(propagation = MANDATORY)` на `record` обоих сервисов; прокси CGLIB строится для пакетных классов `@Service` с публичным методом интерфейса. Вне транзакции `IllegalTransactionStateException`; откат вызывающего убирает и `audit_log`, и `event`; исключение `record`, перехваченное вызывающим, всё равно откатывает его транзакцию (`UnexpectedRollbackException` при фиксации).
+- Публикации нет: журналы не шлют событий Spring и SSE; читатели видят запись после фиксации транзакции вызывающего.
+- `Instant` в SQL только как `OffsetDateTime` UTC; JSON в `jsonb` строкой с `?::jsonb`; `inet` строкой `getHostAddress()` с `?::inet`.
+- `SecretFieldGuard` в `common`, а не в `audit`: его вызывает и `journal` (§2.2 п. 1).
+- Хранение (удаление по сроку) не входит: `event` T3.16, `audit_log` T3.23 (§4.3).
 
-**Обязательные тесты:**
-- Запись содержит автора, время из `Clock`, действие, объект, старое и новое значения (LOG-04).
-- `SecretFieldGuard`: поля удалены на вложенном уровне и в массиве; значение с тем же текстом в обычном поле не затронуто. Запись со значением секрета в таблице не находится.
-- Откат транзакции не оставляет записи.
-- `GET /api/audit`: фильтры, постраничность; дежурный 403.
-- `details` в событии: неизвестное устройство (`null`) допускается и не вызывает ошибку.
+**Шаги:**
+1. `SecretFieldGuard` по §7.2 «Запись журналов»: набор имён, сравнение без учёта регистра по `Locale.ROOT`, `strip` на глубокой копии (удаление полей у `ObjectNode`, обход значений `ObjectNode` и `ArrayNode`; в Jackson 3 `properties()` изменяемо, `removeIf` по ключу работает).
+2. `EventJournalService` (`@Service`, пакетный класс, `implements EventJournal`; конструктор `(JdbcClient, JsonMapper)`): проверки `null` через `Objects.requireNonNull`; `details` = `null` или `writeValueAsString(SecretFieldGuard.strip(valueToTree(details)))`; один `insert into event(ts, device_id, type, source_ip, description, details) values (?, ?, ?, ?::inet, ?, ?::jsonb)`, `type` = `t.name()`.
+3. `AuditRepository` (`@Repository`, пакетный, `JdbcClient`): `long insert(Instant ts, Actor a, String action, String objectType, String objectId, String oldJson, String newJson)` (`insert ... returning id`); `long count(Filter f)` и `List<AuditEntry> page(Filter f, PageQuery q)`, где `record Filter(Long userId, String objectType, Instant from, Instant to)` вложен в `AuditRepository`. Условие `where` собирается из постоянных фрагментов (`user_id = ?`, `object_type = ?`, `ts >= ?`, `ts < ?`) со значениями параметрами (§14 п. 1); `order by ` + `q.orderBy("id")` + ` limit ? offset ?` с `q.size()`, `q.offset()`. `old_value::text`, `new_value::text` читаются строкой и разбираются `JsonMapper.readTree`, `null` остаётся `null`.
+4. `AuditEntry`: `public record AuditEntry(long id, Instant ts, Long userId, String userLogin, String action, String objectType, String objectId, JsonNode oldValue, JsonNode newValue)` (`tools.jackson.databind.JsonNode`); порядок компонентов задаёт порядок полей JSON §5.2.
+5. `AuditLogService` (`@Service`, пакетный, `implements AuditLog`; конструктор `(AuditRepository, JsonMapper, Clock, EventJournal)`): проверки и шаблоны `action`/`objectType`, время, `deviceId`, `description`, `details` строго по §7.2 «Запись журналов»; порядок: проверки, `clock.instant()`, сериализация обоих значений, `insert`, `events.record(...)`.
+6. `AuditController` (`@RestController`, пакетный): `@PreAuthorize("hasRole('ADMIN')") @GetMapping("/api/audit") PageResponse<AuditEntry> list(@RequestParam(required = false) String page, String size, String sort, Long userId, String objectType, Instant from, Instant to)` (каждый параметр `@RequestParam(required = false)`); сначала `PageQuery.parse(page, size, sort, Map.of("ts", "ts"), "ts,desc")`, затем при `from != null && to != null && from.isAfter(to)` `throw ApiException.validation(List.of(new FieldError(null, "Начало периода позже конца")))`, затем `count` и `page`, ответ `PageResponse.of(items, q, total)`.
+7. `audit.csv`: заголовок `метод,путь,OPERATOR,ADMIN,ANON` и ровно одна строка `GET,/api/audit,deny,allow,deny`.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='AuditLogTest,EventJournalWriteTest,ArchitectureTest'`
+**Обязательные тесты (имена методов обязательны; тело читать `getContentAsString(StandardCharsets.UTF_8)`; транзакции в тестах через `new TransactionTemplate(PlatformTransactionManager)`; пользователь для `Actor` создаётся `TestData.user(Role.ADMIN)`, иначе нарушается внешний ключ `audit_log.user_id`; время через `MutableClock.set`):**
+- `SecretFieldGuardTest` (без Spring, `JsonMapper.builder().build()`):
+  - `removesAtAnyDepth`: из `{"a":{"community":"S1","list":[{"authPassword":"S2","x":1},[{"privPassword":"S3"}]]},"Password":"S4","PASSWORD_HASH":"S5","ciphertext":"S6","oldPassword":"S7","newPassword":"S8","passwordHash":"S9"}` получается ровно `{"a":{"list":[{"x":1},[{}]]}}`.
+  - `keepsOtherFieldsAndValues`: `{"note":"password","passwordPolicy":"community","user":"u"}` не меняется.
+  - `doesNotMutateInput`: исходное дерево после `strip` равно своей копии, снятой до вызова.
+  - `nullAndScalars`: `strip(null)` = `null`; строковый и числовой узел возвращаются равными исходным.
+- `EventJournalWriteTest` (`@IntegrationTest`, внедрённый `EventJournal`):
+  - `recordsAllColumns`: устройство через `TestData`, `record(TRAP, deviceId, InetAddress.getByAddress(new byte[]{10,1,2,3}), "описание", details, ts)`, где `details` = `HashMap` с `"k"→"v"` и `"n"→null`, `ts` = `2026-01-01T00:00:00.123456Z`: в строке `ts` равен `ts`, `device_id`, `type` `TRAP`, `host(source_ip)` = `10.1.2.3`, `description`, `details = '{"k":"v","n":null}'::jsonb` истинно.
+  - `unknownDeviceAllowed` (LOG-01, неизвестный источник): `record(TRAP_UNKNOWN_SOURCE, null, null, "x", null, ts)` без исключения; `device_id`, `source_ip`, `details` в строке `null` (SQL `NULL`, `details is null`).
+  - `detailsStripped`: `details` с вложенным `community` уникальной строкой: строка в `event` есть, уникальной строки в `t::text` нет (`select count(*) from event t where position(? in t::text) > 0` = 0).
+  - `requiresTransaction`: вызов без транзакции даёт `IllegalTransactionStateException`, строк `event` 0.
+  - `rollbackLeavesNothing`: запись и `setRollbackOnly()` в одной транзакции: строк `event` 0.
+  - `requiredArguments`: `t`, `description`, `ts` равные `null` (каждый в своей транзакции) дают `NullPointerException`.
+- `AuditLogTest` (`@IntegrationTest`, внедрённые `AuditLog`, `JdbcClient`, `PlatformTransactionManager`, `MutableClock`, `TestData`):
+  - `recordStoresAllFields` (LOG-04): `clock.set(2026-01-02T03:04:05.123456Z)`, устройство через `TestData`, `record(new Actor(u, "adm-login"), "UPDATE", "device", String.valueOf(dev), Map.of("name","a"), Map.of("name","b"))`: в `audit_log` одна строка, `ts` равен установленному времени, `user_id` = `u`, `user_login` `adm-login`, `action`, `object_type`, `object_id`, `old_value = '{"name":"a"}'::jsonb` и `new_value = '{"name":"b"}'::jsonb` истинны. В `event` одна строка: `type` `USER_ACTION`, тот же `ts`, `device_id` = `dev`, `source_ip` `null`, `description` ровно `Действие пользователя adm-login: UPDATE device <dev>`, `details` равно jsonb `{"auditId":<id строки audit_log>,"userId":u,"login":"adm-login","action":"UPDATE","objectType":"device","objectId":"<dev>"}`.
+  - `nonDeviceObjects`: `record(actor, "UPDATE", "setting", "auth.lock_attempts", …)` даёт `event.device_id` `null`; `record(actor, "CREATE", "user", null, null, null)` даёт `object_id`, `old_value`, `new_value` SQL `NULL` и `description` ровно `Действие пользователя adm-login: CREATE user` (без завершающего пробела).
+  - `secretsNotStored` (LOG-04 «не секреты», §10.4): уникальные строки S1..S5 в `oldValue` = `Map.of("password","S1","nested",Map.of("community","S2"),"list",List.of(Map.of("authPassword","S3")))` и `newValue` = `Map.of("creds", new SnmpCredentials.V3("u-plain","SHA","S4","AES","S5"), "note","S1-copy")`: поиск `position(? in t::text) > 0` по `audit_log` и по `event` для S2..S5 даёт 0; строка `S1-copy` в `audit_log` находится (обычное поле не затронуто), `S1` отдельно не ищется, потому что входит в `S1-copy`. Поле `user` записи `V3` не проверяется (закрывает T1.22, §7.2).
+  - `rollbackLeavesNothing`: в одной транзакции `insert into device_group(name) values (?)`, `record(...)`, `setRollbackOnly()`: строк `audit_log`, `event` и этой группы 0.
+  - `commitKeepsBoth`: то же без отката: группа, одна строка `audit_log` и одна `event` есть.
+  - `requiresTransaction`: вызов без транзакции даёт `IllegalTransactionStateException`; строк `audit_log` и `event` 0.
+  - `failureRollsBackCaller`: в транзакции вставка группы, затем `record` с `action` `"bad action"`, исключение `IllegalArgumentException` вызывающий перехватывает; `execute` бросает `UnexpectedRollbackException`; группы нет. Фиксирует правило «ошибка журнала отменяет изменение» (§7.2).
+  - `argumentChecks`: `action` `update`, `""`, `null`, `"A".repeat(65)` и `objectType` `Device`, `""`, `null` дают `IllegalArgumentException`; `a` = `null` даёт `NullPointerException`; в каждом случае строк нет.
+- `AuditApiTest` (`@IntegrationTest`, `Api`):
+  - `adminReadsEntry`: одна запись (`clock.set(2026-03-01T00:00:10Z)`, `"UPDATE"`, `"setting"`, `"k"`, `Map.of("v","<b>1</b>")`, `Map.of("v","2")`): `GET /api/audit` от `ADMIN` 200, тело ровно `{"items":[{"id":<id>,"ts":"2026-03-01T00:00:10Z","userId":<u>,"userLogin":"adm","action":"UPDATE","objectType":"setting","objectId":"k","oldValue":{"v":"<b>1</b>"},"newValue":{"v":"2"}}],"page":0,"size":50,"total":1}` (HTML хранится и отдаётся текстом JSON).
+  - `stablePaging` (правило постраничных ресурсов): три записи при одном значении `MutableClock` и одна на 10 с позже; `size=1`, страницы 0..3 дают каждую из четырёх записей ровно один раз в порядке `ts desc, id desc`; `page=4&size=1` 200, `items` `[]`, `total` 4; `sort=ts,asc` даёт обратный порядок по `ts` и `id`.
+  - `filters`: два пользователя, два `objectType`, записи на `2026-03-01T00:00:00Z` и `2026-03-01T00:00:10Z`: `userId`, `objectType`, `from` (включительно), `to` (исключительно) и их сочетание дают ожидаемые множества `id` и `total`; `from=…:10Z&to=…:10Z` даёт `total` 0; неизвестный `userId` 200 с `total` 0.
+  - `badParameters`: `from=abc`, `from=2026-03-01` 400 `BAD_PARAMETER` с полем `from`; `to=abc` с полем `to`; `userId=x` с полем `userId`; `from=2026-03-02T00:00:00Z&to=2026-03-01T00:00:00Z` 400, тело ровно `{"code":"VALIDATION_FAILED","message":"Проверьте введённые данные","fields":[{"field":null,"message":"Начало периода позже конца"}]}`; `sort=id` и `size=0` 400 `VALIDATION_FAILED` с полем `sort` и `size`.
+  - `rights`: `OPERATOR` 403, тело ровно `{"code":"FORBIDDEN","message":"Недостаточно прав","fields":[]}`; без сессии (бин `MockMvc` напрямую) 401 `AUTH_REQUIRED`.
+- `ArchitectureTest`: зелёный без правок (`audit` и `journal` зависят только от `contract` и `common`; контроллер с `@PreAuthorize`).
+- Существующие тесты без правок зелёные (проверено прототипом: `TestDb.clean()` уже очищает `audit_log` и `event`).
 
-**Критерии готовности:** тесты зелёные; запись не нарушает транзакцию вызывающего.
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretFieldGuardTest,EventJournalWriteTest,AuditLogTest,AuditApiTest,ArchitectureTest'`
 
-**Запрещено:** поиск по журналу событий (T3.15); страница (T1.32).
+**Критерии готовности:** тесты зелёные; запись участвует в транзакции вызывающего (`MANDATORY`, не `REQUIRES_NEW`); значения в журнал идут только через `SecretFieldGuard`; в отчёте перечислено непроверенное.
+
+**Запрещено:** правка `contract/` и миграций; запись журналов вне транзакции вызывающего или после фиксации; копирование `oldValue`/`newValue` в `event.details`; свой `JsonMapper` вместо бина; поиск по журналу событий и `GET /api/events` (T3.15); удаление по сроку (T3.16, T3.23); страница (T1.32); запись журнала при входе и выходе (ТЗ не требует).
 
 ---
 
@@ -335,11 +376,13 @@
 **Цель:** сессия истекает через настраиваемый срок простоя, и сервер умеет завершать сессии пользователя.
 **Исполнитель:** backend-core. **Зависит от:** T1.07.
 
-**Файлы:** `S/auth/SessionTimeoutApplier.java`, `UserSessionRegistry.java`, правка `JsonAuthHandlers.java`, `T/auth/SessionExpiryTest.java`.
+**Файлы:** `S/auth/SessionTimeoutApplier.java`, `UserSessionRegistry.java`, правка `JsonAuthHandlers.java`, `T/auth/SessionExpiryTest.java`; `T/auth/LoginTest.java` (только шаг «Сообщения LoginTest»).
 
 **Контракты:** §5.1, §4.2 (`session.timeout_minutes`), §13.
 
-**Шаги:** при успешном входе `setMaxInactiveInterval(минуты*60)`. Реестр: `userId -> HttpSession`, очистка в `HttpSessionListener`, метод `terminateAll(userId)`. Секундное переопределение для теста: свойство `nm.session.timeout-seconds-override` только в профиле `test`.
+**Шаги:** при успешном входе `setMaxInactiveInterval(минуты*60)`. Реестр: `ConcurrentHashMap<Long, Set<HttpSession>>`, ключ `CurrentUser.id()` (решение ревью T1.05: `CurrentUser` не переопределяет `equals`/`hashCode`, сам principal ключом не служит, §5.1), очистка в `HttpSessionListener`, метод `terminateAll(long userId)` завершает все сессии пользователя, включая текущую. Поводы вызова: смена роли, отключение, сброс пароля (T1.11), смена своего пароля (T1.12, кроме текущей сессии). Секундное переопределение для теста: свойство `nm.session.timeout-seconds-override` только в профиле `test`.
+
+**Сообщения LoginTest (ревью T1.05), других изменений `LoginTest` нет:** (1) `passwordStoredAsBcrypt`: `assertThat(hash).startsWith("$2a$10$")` заменить на `assertThat(hash.startsWith("$2a$10$")).as("password_hash начинается с $2a$10$").isTrue()`, чтобы упавшая проверка не печатала хэш; (2) `setCookie`: сообщение `AssertionError` перечисляет только имена cookie (`all.stream().map(v -> v.split("=", 2)[0]).toList()`), без значений.
 
 **Обязательные тесты (реальный Tomcat, `RestartableApp`):**
 - После срока с переопределением 2 с запрос даёт 401, ожидание опросом условия.
@@ -374,6 +417,7 @@
 - Гонка: 20 одновременных неверных попыток при `N=5` дают `failed_attempts >= 5` и блокировку, без 500.
 - Неизвестный логин не вызывает ошибку и не создаёт строк.
 - Другой пользователь не затронут.
+- Вход с паролем 73 байта (`"a".repeat(73)`) даёт 401 `AUTH_FAILED`, не 500 (`matches` даёт `false`, проверено прототипом T1.06), и считается неудачей.
 
 **Команда проверки:** `mvn -B -pl server -am test -Dtest='LoginLockTest,ArchitectureTest'`
 
@@ -388,22 +432,23 @@
 **Цель:** первый администратор создаётся только из явно переданных при установке данных, общего пароля по умолчанию нет.
 **Исполнитель:** backend-core. **Зависит от:** T1.09.
 
-**Файлы:** `S/auth/AdminBootstrap.java`, `T/auth/AdminBootstrapTest.java`.
+**Файлы:** `S/auth/AdminBootstrap.java`, `S/auth/PasswordPolicy.java`, `T/auth/AdminBootstrapTest.java`, `T/auth/PasswordPolicyTest.java`.
 
-**Контракты:** §13 (`nm.bootstrap.*`), AUTH-06.
+**Контракты:** §13 (`nm.bootstrap.*`), §5.2 «Пароли», AUTH-06.
 
-**Шаги:** `ApplicationRunner`: нет пользователей и заданы логин и файл пароля: создать ADMIN. Содержимое файла: UTF-8, BOM и завершающий перевод строки отбрасываются. Минимальная длина 8.
+**Шаги:** `ApplicationRunner`: нет пользователей и заданы логин и файл пароля: создать ADMIN. Содержимое файла: UTF-8, BOM и завершающий перевод строки отбрасываются. `PasswordPolicy` по §5.2 «Пароли» (не меньше 8 символов, не больше 72 байт UTF-8; ревью T1.05: `encode` бросает `IllegalArgumentException` на пароле длиннее 72 байт); нарушение прерывает запуск сообщением `"Пароль первого администратора: " + сообщение политики`.
 
 **Обязательные тесты:**
 - Файл задан, пользователей нет: администратор создан, вход работает.
 - Пользователи уже есть: файл не применяется, существующий пароль не меняется.
 - Файла нет и нет настроек: приложение запускается, в логе инструкция, вход невозможен.
-- Файл указан, но отсутствует; файл пустой; пароль 7 символов: запуск прерывается с понятным сообщением.
+- Файл указан, но отсутствует; файл пустой; пароль 7 символов; пароль 73 байта: запуск прерывается с понятным сообщением.
+- `PasswordPolicyTest` (без Spring): `null`, пусто, 7 символов дают «Не менее 8 символов»; 8 символов, 72 `a`, 36 `я` проходят; 73 `a`, 37 `я` дают «Не более 72 байт в UTF-8 (72 латинских или 36 русских букв)»; 8 символов из суррогатных пар (`"😀".repeat(8)`, 32 байта) проходят.
 - Файл с BOM и CRLF: пароль читается верно.
 - Пароль не появляется в логе (`LogCapture`).
 - В `R/` и `application.yml` нет `nm.bootstrap.*` со значением (поиск по ресурсам из теста).
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='AdminBootstrapTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='AdminBootstrapTest,PasswordPolicyTest,ArchitectureTest'`
 
 **Критерии готовности:** тесты зелёные. Запрос значений у установщика: T8.06.
 
@@ -416,16 +461,17 @@
 **Цель:** администратор создаёт пользователя, меняет роль, сбрасывает пароль и отключает, не теряя записей журнала и последнего администратора.
 **Исполнитель:** backend-core. **Зависит от:** T1.10.
 
-**Файлы:** `S/auth/UserAdminService.java`, `UserController.java`, `PasswordPolicy.java`, `T/auth/UserAdminTest.java`, дополнение `security-matrix/auth.csv`.
+**Файлы:** `S/auth/UserAdminService.java`, `UserController.java`, `T/auth/UserAdminTest.java`, дополнение `security-matrix/auth.csv`. `PasswordPolicy` (T1.10) используется без изменений.
 
-**Контракты:** §5.2 (`/api/users*`), §15 A-3.
+**Контракты:** §5.1 (`CurrentUser` есть снимок), §5.2 (`/api/users*`, «Пароли», «Журнал действий и журнал событий»), §7.2 «Запись журналов», §15 A-3.
 
-**Шаги:** отключение и сброс пароля вызывают `UserSessionRegistry.terminateAll`. Запись в журнал действий без пароля и хэша. Проверка последнего администратора под блокировкой строк `SELECT ... WHERE role='ADMIN' AND active FOR UPDATE`.
+**Шаги:** отключение, смена роли (ревью T1.05: `CurrentUser` в сессии хранит роль на момент входа, понижение иначе не действовало бы до выхода) и сброс пароля вызывают `UserSessionRegistry.terminateAll` после фиксации транзакции изменения. Пароль проверяет `PasswordPolicy`: 400 `VALIDATION_FAILED`, поле `password` (создание) или `newPassword` (сброс). Запись в журнал действий без пароля и хэша. Проверка последнего администратора под блокировкой строк `SELECT ... WHERE role='ADMIN' AND active FOR UPDATE`.
 
 **Обязательные тесты:**
 - Создать, сменить роль, сбросить пароль: старый пароль не работает, новый работает.
 - AUTH-04: отключённый не входит, его активная сессия получает 401, его записи `audit_log` остались.
-- Дубль логина без учёта регистра 409; пароль 7 символов 400, 8 проходит; пустая и неизвестная роль 400.
+- Дубль логина без учёта регистра 409; пароль 7 символов 400, 8 проходит; 73 байта (`"a".repeat(73)`, `"я".repeat(37)`) 400 `VALIDATION_FAILED` с полем, не 500, 72 байта проходят; то же для сброса; пустая и неизвестная роль 400.
+- Смена роли: действующая сессия пользователя (вход до смены) получает 401; после нового входа `GET /api/me` показывает новую роль; понижение `ADMIN` до `OPERATOR` сразу закрывает ему `GET /api/audit` (401, затем после входа 403).
 - Нельзя отключить или понизить последнего действующего администратора: 409 `LAST_ADMIN`.
 - Гонка: два администратора одновременно отключают друг друга, остаётся хотя бы один действующий.
 - В ответах API нет `password`, `passwordHash`.
@@ -453,7 +499,7 @@
 **Обязательные тесты:**
 - AUTH-05: после смены старый пароль не входит, новый входит. Обе роли.
 - Неверный старый 400 `OLD_PASSWORD_INVALID`, пароль не изменён.
-- Слабый новый 400; новый равный старому 400.
+- Слабый новый 400; новый 73 байта 400 `VALIDATION_FAILED` с полем `newPassword`, не 500; новый равный старому 400.
 - Другая сессия этого пользователя получает 401, текущая работает.
 - Неверный старый не считается попыткой блокировки входа (проверка счётчика).
 - Тело запроса и значения паролей нет в логах.
@@ -780,6 +826,7 @@
 - Поиск по всем текстовым столбцам `audit_log` и `event`.
 - Неверный JSON с секретом в теле: тело не попадает в сообщение об ошибке и лог.
 - Тест контроля: запись той же строки в лог заставляет проверку упасть (проверка самого поиска).
+- `loginPasswordNotLogged` (ревью T1.05): `LogCapture.level("org.springframework.security", Level.DEBUG)` и `level("ru.netmon", Level.DEBUG)`; удачный и неудачный вход формой с уникальным паролем (в теле и, отдельным запросом, в строке запроса `/api/auth/login?username=…&password=…`): пароля нет в `LogCapture.text()`; положительный контроль, что `DEBUG` Spring Security пишется (в выводе есть строка логгера `org.springframework.security`).
 
 **Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretLeakSweepTest,ArchitectureTest'`
 
