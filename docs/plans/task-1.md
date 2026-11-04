@@ -444,29 +444,53 @@
 
 ## T1.08. Истечение сессии
 
-**Цель:** сессия истекает через настраиваемый срок простоя, и сервер умеет завершать сессии пользователя.
-**Исполнитель:** backend-core. **Зависит от:** T1.07.
+**Цель:** сессия истекает через настраиваемый срок простоя, сервер умеет завершать сессии пользователя; заодно закрываются дешёвые замечания ревью T1.05 и T1.07 к тестам.
+**Исполнитель:** backend-core. **Зависит от:** T1.07. **Фичи:** AUTH-07 (истечение, срок настраивается; выход сделан в T1.05), OPS-08 (применение `session.timeout_minutes`).
 
-**Файлы:** `S/auth/SessionTimeoutApplier.java`, `UserSessionRegistry.java`, правка `JsonAuthHandlers.java`, `T/auth/SessionExpiryTest.java`; `T/auth/LoginTest.java` (только шаг «Сообщения LoginTest»).
+**Файлы:**
+- Новые в `main`: `S/auth/SessionTimeoutApplier.java`, `S/auth/UserSessionRegistry.java`.
+- Правка в `main`: `S/auth/JsonAuthHandlers.java` (конструктор и начало `onAuthenticationSuccess`, остальное без изменений).
+- Тесты новые: `T/auth/SessionExpiryTest.java`, `server/src/test/java/nmtest/auth/SlowSessionController.java`.
+- Тесты правятся: `T/auth/LoginTest.java` (только шаг 4), `T/settings/SettingsServiceTest.java` (только шаг 5).
+- Не правятся: `SecurityConfig`, `application.yml`, `application-test.yml`, `ApiErrorHandler`, `contract/`, миграции, `T/testsupport/`, `security-matrix/*.csv` (эндпоинтов нет), остальные тесты. Зависимости не добавляются.
 
-**Контракты:** §5.1, §4.2 (`session.timeout_minutes`), §13.
+**Контракты:** §5.1 («Безопасность», «Сессии»), §6 (проверка сессии, для связи с T1.24), §7.2 «Настройки», §12.2 («Сессии на Tomcat», «Общая БД JVM», тестовые бины в `nmtest`, помощники не меняют общий контекст), §13.1 (`nm.session.timeout-seconds-override`), §13.2 (`session.timeout_minutes`: следующий вход), §14.
 
-**Шаги:** при успешном входе `setMaxInactiveInterval(минуты*60)`. Реестр: `ConcurrentHashMap<Long, Set<HttpSession>>`, ключ `CurrentUser.id()` (решение ревью T1.05: `CurrentUser` не переопределяет `equals`/`hashCode`, сам principal ключом не служит, §5.1), очистка в `HttpSessionListener`, метод `terminateAll(long userId)` завершает все сессии пользователя, включая текущую. Поводы вызова: смена роли, отключение, сброс пароля (T1.11), смена своего пароля (T1.12, кроме текущей сессии). Секундное переопределение для теста: свойство `nm.session.timeout-seconds-override` только в профиле `test`. Срок читается `Settings.getInt("session.timeout_minutes")` при каждом успешном входе (без своего кэша, §7.2 «Настройки»; T1.07). `SessionExpiryTest` помечается `@IntegrationTest`, а меняет настройку только через `Api` или `JdbcClient` своего контекста и возвращает её в `@AfterEach` через `TestDb.restoreSettings()` (§12.2): `RestartableApp` видит новое значение сразу, перезапуск не нужен.
+**Решения (проверены прототипом в копии проекта, `-o`, `offline/m2`; полный `mvn -pl server -am test` зелёный в порядках `alphabetical` и `reversealphabetical`, 126 тестов с пробным классом):**
+- Срок пишется в сессию при входе `setMaxInactiveInterval(минуты * 60)`; смена настройки действует на следующий вход, открытая сессия хранит свой (прототип: 43200 у прежней, 1800 у новой после `PUT 30`).
+- Истечение делает Tomcat по системному времени, `MutableClock` его не двигает, `MockHttpSession` не истекает. Поэтому срок из настройки проверяется в `MockMvc` через `getMaxInactiveInterval()`, а истечение только на `RestartableApp` с переопределением 2 с и `server.tomcat.background-processor-delay=1s`: фоновая проверка снимает сессию за 2..8 с (прототип 5,7 с), тест ждёт опросом `sessionCount`, не трогая сессию. Ленивое истечение при обращении тоже даёт 401 и снимает запись (прототип), отдельным тестом не закрепляется: без `sleep` его не дождаться.
+- Реестр снимает запись через `HttpSessionBindingListener`, а не `HttpSessionListener` (§5.1 «Сессии»): работает и в `MockMvc` (прототип: выход и `invalidate` снимают запись), и при повторном входе другим пользователем в ту же сессию.
+- `terminateAll` внутри транзакции действует после фиксации, при откате сессии живы (прототип). `invalidate()` из чужого потока безопасен: запрос в полёте завершается 200 без новой сессии, следующий 401 (прототип).
 
-**Сообщения LoginTest (ревью T1.05), других изменений `LoginTest` нет:** (1) `passwordStoredAsBcrypt`: `assertThat(hash).startsWith("$2a$10$")` заменить на `assertThat(hash.startsWith("$2a$10$")).as("password_hash начинается с $2a$10$").isTrue()`, чтобы упавшая проверка не печатала хэш; (2) `setCookie`: сообщение `AssertionError` перечисляет только имена cookie (`all.stream().map(v -> v.split("=", 2)[0]).toList()`), без значений.
+**Шаги:**
+1. `SessionTimeoutApplier` строго по §5.1 «Сессии» (константа `OVERRIDE` = `"nm.session.timeout-seconds-override"`, тексты исключений дословно).
+2. `UserSessionRegistry` строго по §5.1 «Сессии»: поля, `Binding`, методы `register`, `terminateAll`, `terminateOthers`, `sessionCount`, `userCount`, откладывание до `afterCommit`. Никаких других полей и кэшей, никакой записи в БД.
+3. `JsonAuthHandlers`: конструктор `(JsonMapper json, SessionTimeoutApplier timeout, UserSessionRegistry registry)`; в начале `onAuthenticationSuccess` после чтения `CurrentUser`: `HttpSession session = request.getSession(false)` (`null`: `IllegalStateException` «Нет сессии после входа»), затем в `try` `timeout.apply(session)` и `registry.register(user.id(), session)`, в `catch (RuntimeException e)` `session.invalidate()` и `throw e`. Получение токена CSRF и тело 200 без изменений.
+4. Сообщения `LoginTest` (ревью T1.05), других изменений `LoginTest` нет: (1) `passwordStoredAsBcrypt`: `assertThat(hash).startsWith("$2a$10$")` заменить на `assertThat(hash.startsWith("$2a$10$")).as("password_hash начинается с $2a$10$").isTrue()`, чтобы упавшая проверка не печатала хэш; (2) `setCookie`: сообщение `AssertionError` перечисляет только имена cookie: `"нет Set-Cookie " + name + ": " + all.stream().map(v -> v.split("=", 2)[0]).toList()`, без значений.
+5. `SettingsServiceTest.concurrentUpdatesSerialized` (ревью T1.07, п. 3), других изменений нет: (1) запрос опроса `select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and wait_event_type = 'Lock' and query like 'select value from system_setting%'`; (2) в потоке 1 результат ожидания проверяется: `if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("release не дождался");` (транзакция потока 1 откатывается, `f1.get` падает, тест не проходит молча).
+6. `SlowSessionController` (`nmtest.auth`, `public class`, `@RestController`): `public static volatile CountDownLatch entered`, `release`; `@PreAuthorize("hasAnyRole('OPERATOR','ADMIN')") @GetMapping("/api/test-session/slow") String slow(HttpServletRequest r)`: `entered.countDown()`, `release.await(10, SECONDS)` (результат `false`: `IllegalStateException`), ответ `"{\"session\":" + (r.getSession(false) != null) + "}"`. Подключается только `extraSources` `RestartableApp` в `SessionExpiryTest` (§12.2); тест перед использованием присваивает обоим полям новые `CountDownLatch(1)`.
 
-**Обязательные тесты (реальный Tomcat, `RestartableApp`):**
-- После срока с переопределением 2 с запрос даёт 401, ожидание опросом условия.
-- Активность продлевает сессию.
-- Смена настройки применяется к новому входу, существующая сессия сохраняет свой срок.
-- `terminateAll`: все сессии пользователя получают 401, сессия другого пользователя жива.
-- Реестр не накапливает завершённые сессии (проверка размера после истечения).
+**Обязательные тесты (имена методов обязательны; тело читать `getContentAsString(StandardCharsets.UTF_8)` или `HttpResponse.body()`; пользователи `OPERATOR` с паролем вставляются через `JdbcClient` и `PasswordEncoder`, как в `LoginTest`; вход формой с cookie и заголовком из `GET /api/auth/csrf`; на Tomcat `java.net.http.HttpClient` на `http://127.0.0.1:<port>`, cookie заголовком `Cookie` вручную; `AUTH_REQUIRED` = тело ровно `{"code":"AUTH_REQUIRED","message":"Требуется вход в систему","fields":[]}`; ожидания только опросом условия с предельным сроком 20 с через `Instant.now()` теста и `Thread.onSpinWait()`, без `sleep`):**
+- `SessionExpiryTest` (`@IntegrationTest`, пакет `ru.netmon.auth`; внедрены `MockMvc`, `JdbcClient`, `PasswordEncoder`, `UserSessionRegistry`, `Api`, `TestDb`, `PlatformTransactionManager`; `@AfterEach void restore() { db.restoreSettings(); }`, без `try`/`finally` ради настроек в теле методов). `MockMvc` и бин реестра общего контекста:
+  - `timeoutFromSettingAtLogin` (AUTH-07, OPS-08): вход A: `getMaxInactiveInterval()` = 43200; `api.as(Role.ADMIN).put("/api/settings/session.timeout_minutes", "{\"value\":\"30\"}")` 200; у A по-прежнему 43200; вход B того же пользователя: 1800; `sessionCount(id)` = 2.
+  - `invalidStoredTimeoutRejectsLogin`: SQL `update system_setting set value = '0' where key = 'session.timeout_minutes'`; вход с переданной `new MockHttpSession()`: `perform` бросает `IllegalStateException` с сообщением ровно `Недопустимое значение настройки session.timeout_minutes в БД`; переданная сессия `isInvalid()`; `sessionCount(id)` = 0.
+  - `reloginMovesRegistration`: вход пользователя 1 даёт сессию S; вход пользователя 2 с `.session(S)`: `sessionCount(id1)` = 0, `sessionCount(id2)` = 1; повторный вход пользователя 2 с S: `sessionCount(id2)` = 1.
+  - `terminateAllAfterCommit`: две сессии пользователя 1, одна пользователя 2. В `TransactionTemplate` `terminateAll(id1)` и `setRollbackOnly()`: обе сессии живы, `GET /api/me` 200. В `TransactionTemplate` без отката `terminateAll(id1)`: внутри транзакции сессия жива (`isInvalid()` ложно); после неё обе `isInvalid()`, `GET /api/me` с каждой 401 и `AUTH_REQUIRED`, `sessionCount(id1)` = 0; сессия пользователя 2 даёт 200, `sessionCount(id2)` = 1. Вне транзакции `terminateAll(id2)` действует сразу.
+  - `terminateOthersKeepsCurrent`: сессии A и B пользователя; `terminateOthers(id, A)`: A 200, B 401, `sessionCount(id)` = 1. `terminateAll` для пользователя без сессий не бросает.
+  - `logoutUnregisters`: вход, `POST /api/auth/logout` 204, `sessionCount(id)` = 0.
+  - `overrideOnlyInTestProfile` (без контекста, `org.springframework.mock.env.MockEnvironment`, `Settings` = `null`): с `OVERRIDE` = `"2"` без профилей конструктор даёт `IllegalStateException` с сообщением ровно `nm.session.timeout-seconds-override допустимо только в профиле test`; с `setActiveProfiles("test")` создаётся; `"0"` и `"3601"` в профиле `test`: сообщение ровно `nm.session.timeout-seconds-override: целое число от 1 до 3600`.
+- Tomcat (`try (RestartableApp app = new RestartableApp(Map.of("nm.session.timeout-seconds-override", "2", "server.tomcat.background-processor-delay", "1s"), SlowSessionController.class).start())`; реестр `app.context().getBean(UserSessionRegistry.class)`, не внедрённый):
+  - `idleSessionExpiresOnTomcat` (AUTH-07): вход; `sessionCount(id)` = 1; опрос до `sessionCount(id) == 0` без запросов этой сессией; затем `GET /api/me` с ней 401 и `AUTH_REQUIRED`; `userCount()` = 0 (реестр не накапливает истекшие).
+  - `activityExtendsSession`: два входа одного пользователя, B и C; цикл: `GET /api/me` с B даёт 200, пока `sessionCount(id) == 2` (предельный срок 20 с); после цикла B 200, C 401, время от входа B больше 2 с (`System.nanoTime()` теста). На прототипе около 4000 запросов за 6 с; это допустимо.
+  - `terminateAllOnTomcat`: две сессии пользователя 1, одна пользователя 2; `terminateAll(id1)` из потока теста: обе 401, сессия пользователя 2 200, `sessionCount(id1)` = 0. Запрос в полёте: новая сессия E пользователя 1, `HttpClient.sendAsync` на `/api/test-session/slow`, `entered.await(10, SECONDS)` истинно, `terminateAll(id1)`, `release.countDown()`: ответ 200, тело ровно `{"session":false}`, в ответе нет `Set-Cookie` с `JSESSIONID=`; затем E 401. В конце `app.stop()`: `sessionCount(id2)` = 0, `userCount()` = 0 у того же объекта реестра.
+- `LoginTest`, `CsrfTest`, `SettingsServiceTest`, `SettingsApiTest`: зелёные (прототип: изменение входа их не задевает; `Api` входит через `authentication(...)` и реестр не наполняет).
+- `ArchitectureTest`: зелёный без правок (`SlowSessionController` вне `ru.netmon`).
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='SessionExpiryTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='SessionExpiryTest,LoginTest,CsrfTest,SettingsServiceTest,SettingsApiTest,ArchitectureTest'`; затем полный `mvn -B -pl server -am test -Dsurefire.runOrder=alphabetical` и то же с `reversealphabetical`, оба зелёные.
 
-**Критерии готовности:** тесты зелёные, ожиданий через `sleep` нет.
+**Критерии готовности:** тесты зелёные в обоих порядках; `sleep` в тестах нет; `SecurityConfig` и `application*.yml` не изменены; `nm.session.timeout-seconds-override` встречается только в `SessionTimeoutApplier` и тестах; у `SessionTimeoutApplier` нет поля со значением настройки; в отчёте перечислено непроверенное (Windows, поведение сессий за обратным прокси, долгий простой 720 минут на реальном сервере).
 
-**Запрещено:** хранение сессий в БД; изменение `SecurityConfig` сверх подключения слушателя.
+**Запрещено:** хранение сессий в БД и Spring Session; любые правки `SecurityConfig` (в том числе `sessionManagement`, `maximumSessions`, `SessionRegistryImpl`, `HttpSessionEventPublisher`, `invalidSessionUrl`); `server.servlet.session.timeout` и переопределение срока в `application*.yml`; бин `HttpSessionListener`; кэш значения настройки; `@DirtiesContext`; запросы проверяемой сессией во время ожидания её истечения.
 
 ---
 
@@ -536,7 +560,7 @@
 
 **Контракты:** §5.1 (`CurrentUser` есть снимок), §5.2 (`/api/users*`, «Пароли», «Журнал действий и журнал событий»), §7.2 «Запись журналов», §15 A-3.
 
-**Шаги:** отключение, смена роли (ревью T1.05: `CurrentUser` в сессии хранит роль на момент входа, понижение иначе не действовало бы до выхода) и сброс пароля вызывают `UserSessionRegistry.terminateAll` после фиксации транзакции изменения. Пароль проверяет `PasswordPolicy`: 400 `VALIDATION_FAILED`, поле `password` (создание) или `newPassword` (сброс). Запись в журнал действий без пароля и хэша. Проверка последнего администратора под блокировкой строк `SELECT ... WHERE role='ADMIN' AND active FOR UPDATE`.
+**Шаги:** отключение, смена роли (ревью T1.05: `CurrentUser` в сессии хранит роль на момент входа, понижение иначе не действовало бы до выхода) и сброс пароля вызывают `UserSessionRegistry.terminateAll(id)` (§5.1 «Сессии»); вызов внутри транзакции изменения допустим, реестр сам откладывает завершение до фиксации. Пароль проверяет `PasswordPolicy`: 400 `VALIDATION_FAILED`, поле `password` (создание) или `newPassword` (сброс). Запись в журнал действий без пароля и хэша. Проверка последнего администратора под блокировкой строк `SELECT ... WHERE role='ADMIN' AND active FOR UPDATE`.
 
 **Обязательные тесты:**
 - Создать, сменить роль, сбросить пароль: старый пароль не работает, новый работает.
@@ -565,7 +589,7 @@
 
 **Контракты:** §5.2 (`/api/me/password`).
 
-**Шаги:** проверить старый, применить `PasswordPolicy`, новый хэш, завершить прочие сессии пользователя, текущая остаётся. Журнал действий без значений.
+**Шаги:** проверить старый, применить `PasswordPolicy`, новый хэш, завершить прочие сессии пользователя `UserSessionRegistry.terminateOthers(user.id(), request.getSession(false))` (§5.1 «Сессии»), текущая остаётся. Журнал действий без значений.
 
 **Обязательные тесты:**
 - AUTH-05: после смены старый пароль не входит, новый входит. Обе роли.
@@ -916,7 +940,7 @@
 
 **Контракты:** §6, §7.2 (`StreamPublisher`), §5.1 (строки таблицы `ApiErrorHandler` с пометкой «с T1.24»).
 
-**Шаги:** `SseEmitter` с собственной ограниченной очередью и отправляющим потоком на клиента, без блокировки издателя. Heartbeat 15 с с проверкой сессии (доступ к объекту `HttpSession`, переданному при подключении). Период heartbeat настраивается для теста.
+**Шаги:** `SseEmitter` с собственной ограниченной очередью и отправляющим потоком на клиента, без блокировки издателя. Heartbeat 15 с с проверкой сессии строго по §6 (объект `HttpSession`, сохранённый при подключении: `IllegalStateException` из `getLastAccessedTime()` или простой по внедрённому `Clock` не меньше `getMaxInactiveInterval()` закрывают поток; T1.08). Период heartbeat настраивается для теста. Тесты истечения и `terminateAll` идут на `RestartableApp` по §12.2 «Сессии на Tomcat»; `terminateAll` вызывается у бина `UserSessionRegistry` из `app.context()` (класс публичный, T1.08).
 
 **Шаг «Начатый ответ» (повторное ревью T1.04, Н-б, Н-в, Н-г; делается до задачи 7):** `ApiErrorHandler` по строкам §5.1 с пометкой «с T1.24»: (1) `AsyncRequestNotUsableException` ищется и в цепочке `getCause()` тем же обходом, что исключения безопасности (не глубже 20 звеньев, без зацикливания), в том числе при неначатом ответе; (2) при `isCommitted()` обрыв клиента (`AsyncRequestTimeoutException`; в цепочке `org.apache.catalina.connector.ClientAbortException` или `AsyncRequestNotUsableException`) даёт `DEBUG` и `return null`; (3) иное при `isCommitted()`, включая серверное `IOException`, даёт `ERROR` со стеком и `throw e`. Порядок проверок §5.1 сохраняется.
 
@@ -980,6 +1004,7 @@
 
 **Обязательные тесты:**
 - AUTH-03: все эндпоинты задачи 1 трижды (дежурный, администратор, без входа).
+- Читаются все файлы `security-matrix/*.csv`, в том числе `auth.csv` (T1.05), `audit.csv` (T1.06), `settings.csv` (T1.07): до T1.26 их ничто не читает (ревью T1.07, п. 1). Файл без заголовка `метод,путь,OPERATOR,ADMIN,ANON`, с другим числом столбцов или значением вне `allow|deny|public`: падение с именем файла и номером строки. Число файлов и строк в отчёте.
 - Эндпоинт вне матрицы: падение (проверено тестовым контроллером вне основного пакета).
 - Строка матрицы без реального эндпоинта: падение (устаревшая запись).
 - Контроллер без `@PreAuthorize`: падение `ArchitectureTest`.
