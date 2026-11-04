@@ -14,6 +14,7 @@ import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
@@ -91,6 +92,8 @@ public class ApiErrorHandler {
         r.getResolvableErrors().forEach(x -> fields.add(new FieldError(field, x.getDefaultMessage())));
       }
     }
+    e.getCrossParameterValidationResults()
+        .forEach(x -> fields.add(new FieldError(null, x.getDefaultMessage())));
     return response(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", VALIDATION_MESSAGE, fields);
   }
 
@@ -170,8 +173,16 @@ public class ApiErrorHandler {
           List.of());
     }
     if (e instanceof ErrorResponse er && er.getStatusCode().is4xxClientError()) {
-      return response(er.getStatusCode(), codeFor(er.getStatusCode().value()), "Запрос не может быть выполнен",
-          List.of());
+      ResponseEntity<Map<String, Object>> base = response(er.getStatusCode(),
+          codeFor(er.getStatusCode().value()), "Запрос не может быть выполнен", List.of());
+      HttpHeaders headers = new HttpHeaders();
+      headers.putAll(base.getHeaders());
+      er.getHeaders().forEach((name, values) -> {
+        if (!name.equalsIgnoreCase(HttpHeaders.CONTENT_TYPE) && !name.equalsIgnoreCase(HttpHeaders.CONTENT_LENGTH)) {
+          headers.put(name, values);
+        }
+      });
+      return new ResponseEntity<>(base.getBody(), headers, base.getStatusCode());
     }
     LOG.error("Необработанная ошибка {} {}", request.getMethod(), request.getRequestURI(), e);
     return response(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Внутренняя ошибка сервера", List.of());

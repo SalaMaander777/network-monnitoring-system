@@ -26,10 +26,31 @@ class ArchitectureTest {
   };
   @ArchTest static final ArchRule modules = classes().that().resideInAPackage("ru.netmon.*..").should(ONLY_ALLOWED);
   @ArchTest static final ArchRule contract = classes().that().resideInAPackage("ru.netmon.contract..").should().onlyDependOnClassesThat().resideInAnyPackage("java..", "ru.netmon.contract..");
+  static final String ERROR_CONTROLLER = "ru.netmon.common.web.ApiErrorController";
   @ArchTest static final ArchRule controllers = methods().that().areDeclaredInClassesThat().areMetaAnnotatedWith(org.springframework.stereotype.Controller.class)
+      .and().areDeclaredInClassesThat().doNotHaveFullyQualifiedName(ERROR_CONTROLLER)
       .and().areMetaAnnotatedWith(org.springframework.web.bind.annotation.RequestMapping.class)
       .should().beAnnotatedWith(org.springframework.security.access.prepost.PreAuthorize.class).allowEmptyShould(true);
-  @ArchTest static final ArchRule controllerPlace = classes().that().areMetaAnnotatedWith(org.springframework.stereotype.Controller.class).should().resideInAPackage("ru.netmon.*..").andShould().resideOutsideOfPackages("ru.netmon.contract..", "ru.netmon.common..").allowEmptyShould(true);
+  @ArchTest static final ArchRule controllerPlace = classes().that().areMetaAnnotatedWith(org.springframework.stereotype.Controller.class).and().doNotHaveFullyQualifiedName(ERROR_CONTROLLER).should().resideInAPackage("ru.netmon.*..").andShould().resideOutsideOfPackages("ru.netmon.contract..", "ru.netmon.common..").allowEmptyShould(true);
+  static final ArchCondition<JavaMethod> OBJECT_BODY = new ArchCondition<>("take @RequestBody only as an object") {
+    public void check(JavaMethod m, ConditionEvents ev) {
+      for (JavaParameter p : m.getParameters()) {
+        if (!p.isAnnotatedWith(org.springframework.web.bind.annotation.RequestBody.class)) continue;
+        JavaClass t = p.getRawType();
+        if (t.isArray() || t.isAssignableTo(java.util.Collection.class) || t.isAssignableTo(java.util.Map.class)) {
+          ev.add(SimpleConditionEvent.violated(m, m.getFullName() + " @RequestBody " + t.getName()));
+        }
+      }
+    }
+  };
+  @ArchTest static final ArchRule objectBody = methods().that().areDeclaredInClassesThat().areMetaAnnotatedWith(org.springframework.stereotype.Controller.class)
+      .and().areMetaAnnotatedWith(org.springframework.web.bind.annotation.RequestMapping.class)
+      .should(OBJECT_BODY).allowEmptyShould(true);
+  @Test void objectBodyRuleCatchesCollectionBody() {
+    var importer = new com.tngtech.archunit.core.importer.ClassFileImporter();
+    assertThat(objectBody.evaluate(importer.importClasses(nmtest.arch.ListBodyController.class)).hasViolation()).isTrue();
+    assertThat(objectBody.evaluate(importer.importClasses(nmtest.common.ErrorsTestController.class)).hasViolation()).isFalse();
+  }
   @Test void noOid() throws Exception {
     try (Stream<Path> s = Files.walk(Path.of("src/main"))) {
       List<Path> bad = s.filter(Files::isRegularFile).filter(p -> !p.startsWith(Path.of("src/main/resources/seed")))

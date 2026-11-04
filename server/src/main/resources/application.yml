@@ -4,6 +4,12 @@ spring:
 
 server:
   port: 8080
+  servlet:
+    session:
+      tracking-modes: cookie
+      cookie:
+        http-only: true
+        same-site: lax
 
 nm:
   data-dir: ./data

@@ -4,11 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import nmtest.common.ErrorsExtraTestController;
 import nmtest.common.ErrorsTestController;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -23,7 +25,7 @@ import ru.netmon.testsupport.IntegrationTest;
 import ru.netmon.testsupport.LogCapture;
 
 @IntegrationTest
-@Import(ErrorsTestController.class)
+@Import({ErrorsTestController.class, ErrorsExtraTestController.class})
 class ApiErrorsTest {
 
   private static final String BASE = "/api/test-errors";
@@ -179,7 +181,7 @@ class ApiErrorsTest {
   @Test
   void pageLimits() throws Exception {
     String[][] bad = {{"size=0", "size"}, {"size=501", "size"}, {"size=-1", "size"}, {"size=abc", "size"},
-        {"size=", "size"}, {"page=-1", "page"}, {"page=abc", "page"}};
+        {"size=", "size"}, {"page=-1", "page"}, {"page=abc", "page"}, {"size=%205", "size"}};
     for (String[] q : bad) {
       op().get(BASE + "/page?" + q[0]).andExpect(status().isBadRequest())
           .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"))
@@ -203,5 +205,40 @@ class ApiErrorsTest {
         .andExpect(jsonPath("$.items[0]").value("created_at desc, id desc"));
     op().get(BASE + "/page?sort=name").andExpect(status().isOk())
         .andExpect(jsonPath("$.items[0]").value("name asc, id asc"));
+  }
+
+  private static final String EXTRA = "/api/test-errors-extra";
+
+  @Test
+  void methodNotAllowedHasAllow() throws Exception {
+    op().delete(EXTRA + "/get-only").andExpect(status().isMethodNotAllowed())
+        .andExpect(jsonPath("$.code").value("METHOD_NOT_ALLOWED"))
+        .andExpect(header().string("Content-Type", "application/json"))
+        .andExpect(header().string("Allow", org.hamcrest.Matchers.containsString("GET")))
+        .andExpect(header().string("Allow", org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("DELETE"))));
+  }
+
+  @Test
+  void unsupportedMediaTypeHasAccept() throws Exception {
+    mockMvc.perform(post(EXTRA + "/json-only").with(user("u").roles("OPERATOR")).with(csrf())
+            .contentType(MediaType.TEXT_PLAIN).content("x"))
+        .andExpect(status().isUnsupportedMediaType())
+        .andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"))
+        .andExpect(header().string("Content-Type", "application/json"))
+        .andExpect(header().string("Accept", org.hamcrest.Matchers.containsString("application/json")));
+  }
+
+  @Test
+  void crossParameterErrorsAfterParameterErrors() throws Exception {
+    assertThat(body(op().get(EXTRA + "/range?from=-1&to=-2").andExpect(status().isBadRequest())))
+        .isEqualTo("{\"code\":\"VALIDATION_FAILED\",\"message\":\"Проверьте введённые данные\",\"fields\":"
+            + "[{\"field\":\"from\",\"message\":\"Не меньше 0\"},"
+            + "{\"field\":null,\"message\":\"Начало диапазона больше конца\"}]}");
+  }
+
+  /** Фиксирует причину запрета (§5.1): Spring 7.0.10 само по себе кросс-параметрическое ограничение не применяет. */
+  @Test
+  void crossParameterAloneIsIgnoredBySpring() throws Exception {
+    op().get(EXTRA + "/range?from=5&to=1").andExpect(status().isOk());
   }
 }

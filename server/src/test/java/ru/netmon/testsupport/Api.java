@@ -1,26 +1,42 @@
 package ru.netmon.testsupport;
 
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
+import ru.netmon.common.security.CurrentUser;
 import ru.netmon.contract.Role;
 
 /**
- * Запросы к API от имени роли (architecture.md §12.2): пользователь и csrf() на каждом запросе.
- * Тип principal меняет T1.05 вместе с этим классом.
+ * Запросы к API от имени роли (architecture.md §12.2): principal {@link CurrentUser} и csrf() на каждом запросе.
+ * Строка app_user с логином test-operator или test-admin создаётся при необходимости (после TestDb.clean() её нет).
  */
 public class Api {
 
     private final MockMvc mvc;
 
-    public Api(MockMvc mvc) {
+    private final JdbcClient jdbc;
+
+    public Api(MockMvc mvc, JdbcClient jdbc) {
         this.mvc = mvc;
+        this.jdbc = jdbc;
+    }
+
+    private UsernamePasswordAuthenticationToken token(Role role) {
+        String login = "test-" + role.name().toLowerCase();
+        jdbc.sql("insert into app_user(login, password_hash, role) values (?, 'h', ?) "
+                + "on conflict ((lower(login))) do nothing").params(login, role.name()).update();
+        long id = jdbc.sql("select id from app_user where lower(login) = lower(?)").param(login)
+                .query(Long.class).single();
+        CurrentUser principal = new CurrentUser(id, login, role, true, null);
+        return UsernamePasswordAuthenticationToken.authenticated(principal, null, principal.getAuthorities());
     }
 
     public As as(Role role) {
@@ -56,7 +72,7 @@ public class Api {
 
         private ResultActions send(HttpMethod method, String url, String body, Object... uriVars) throws Exception {
             MockHttpServletRequestBuilder b = MockMvcRequestBuilders.request(method, url, uriVars)
-                    .with(user("test-" + role.name().toLowerCase()).roles(role.name()))
+                    .with(authentication(token(role)))
                     .with(csrf());
             if (body != null) {
                 b.contentType(MediaType.APPLICATION_JSON).content(body);
