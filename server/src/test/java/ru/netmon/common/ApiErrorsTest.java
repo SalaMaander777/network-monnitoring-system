@@ -1,7 +1,6 @@
 package ru.netmon.common;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -95,7 +94,7 @@ class ApiErrorsTest {
         .andExpect(jsonPath("$.code").value("NOT_FOUND")).andExpect(jsonPath("$.fields").isEmpty());
     op().post(BASE + "/typed", "{}").andExpect(status().isMethodNotAllowed())
         .andExpect(jsonPath("$.code").value("METHOD_NOT_ALLOWED")).andExpect(jsonPath("$.fields").isEmpty());
-    mockMvc.perform(post(BASE + "/body").with(user("u").roles("OPERATOR")).with(csrf())
+    mockMvc.perform(post(BASE + "/body").with(user("u").roles("OPERATOR")).with(api.csrfToken())
         .contentType(MediaType.TEXT_PLAIN).content("x")).andExpect(status().isUnsupportedMediaType())
         .andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE")).andExpect(jsonPath("$.fields").isEmpty());
   }
@@ -220,7 +219,7 @@ class ApiErrorsTest {
 
   @Test
   void unsupportedMediaTypeHasAccept() throws Exception {
-    mockMvc.perform(post(EXTRA + "/json-only").with(user("u").roles("OPERATOR")).with(csrf())
+    mockMvc.perform(post(EXTRA + "/json-only").with(user("u").roles("OPERATOR")).with(api.csrfToken())
             .contentType(MediaType.TEXT_PLAIN).content("x"))
         .andExpect(status().isUnsupportedMediaType())
         .andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"))

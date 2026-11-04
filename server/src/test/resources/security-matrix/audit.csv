@@ -1,0 +1,2 @@
+метод,путь,OPERATOR,ADMIN,ANON
+GET,/api/audit,deny,allow,deny
