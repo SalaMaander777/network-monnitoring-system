@@ -371,27 +371,74 @@
 
 ## T1.07. Настройки системы
 
-**Цель:** настройки читаются модулями через `Settings`, правятся администратором и применяются без перезапуска.
-**Исполнитель:** backend-core. **Зависит от:** T1.06.
+**Цель:** настройки читаются модулями через `Settings`, правятся администратором через API, сохраняются и применяются без перезапуска; заодно закрываются дешёвые замечания ревью T1.06 к журналам.
+**Исполнитель:** backend-core. **Зависит от:** T1.06. **Фичи:** OPS-08 (хранение и правка в API; применение в модулях: T1.08, T1.09, T3.05, T3.16, T4.11), LOG-04 (журнал изменения настроек; доработка `SecretFieldGuard`), LOG-01 (запись события не падает на NUL и зоне IPv6).
 
-**Файлы:** `S/settings/SettingsService.java`, `SettingDefinitions.java`, `SettingsController.java`, `T/settings/SettingsApiTest.java`, `security-matrix/settings.csv`.
+**Файлы:**
+- Новые в `main`: `S/settings/SettingDefinitions.java`, `S/settings/SettingView.java`, `S/settings/SettingUpdate.java`, `S/settings/SettingsService.java`, `S/settings/SettingsController.java`, `S/common/json/NulGuard.java`, `S/common/web/PeriodParams.java`.
+- Правятся в `main` (шаг 7, ревью T1.06): `S/common/json/SecretFieldGuard.java`, `S/journal/EventJournalService.java`, `S/audit/AuditLogService.java`, `S/audit/AuditController.java`.
+- Тесты новые: `T/settings/SettingsApiTest.java`, `T/settings/SettingsServiceTest.java`, `T/settings/SettingChangedEventTest.java`, `server/src/test/java/nmtest/settings/SettingEventsProbe.java`, `server/src/test/resources/security-matrix/settings.csv`.
+- Тесты правятся (шаг 7, только добавление методов и одна замена входа): `T/common/SecretFieldGuardTest.java`, `T/journal/EventJournalWriteTest.java`, `T/audit/AuditLogTest.java`, `T/audit/AuditApiTest.java`.
+- Не правятся: `contract/`, миграции, `SecurityConfig`, `ApiErrorHandler`, `ApiException`, `T/testsupport/` (помощники уже умеют `restoreSettings()`), `auth.csv`, `audit.csv`, остальные тесты. Зависимости не добавляются.
 
-**Контракты:** §5.2 (`/api/settings`), §7.2 (`Settings`, событие `SettingChanged`), §4.2 ключи.
+**Контракты:** §5.2 (`/api/settings`, абзац «Настройки»; абзац «Журнал действий и журнал событий»), §5.1 (ошибки, `PeriodParams`), §7.2 (`Settings`, `SettingChanged`, абзацы «Запись журналов», «Замок строки устройства», «Настройки»), §13.2 (ключи, границы, когда применяется), §4.2 (`system_setting`), §2.1, §2.2, §12.2 (снимок `TestDb`, `restoreSettings()`, `RestartableApp`, тестовые бины в `nmtest`), §12.3, §14.
 
-**Шаги:** `SettingDefinitions` задаёт тип и границы каждого ключа: `retention.results_days` 1..3650, `retention.journal_days` 1..3650, `traps.udp_port` 1..65535, `session.timeout_minutes` 1..43200, `auth.lock_attempts` 1..100, `auth.lock_minutes` 1..1440. Кэш в памяти, обновление только после фиксации. `SettingChanged` после фиксации. Изменение в журнале действий.
+**Решения (проверены прототипом в копии проекта, `-o`, `offline/m2`; полный `mvn -pl server -am test` зелёный в порядках `alphabetical` и `reversealphabetical`, 122 теста):**
+- Кэша нет (§7.2): чтение по первичному ключу на каждый вызов. Причина: горячего пути нет, а кэш устаревал бы после отката, после `TestDb.restoreSettings()` прямым SQL и в другом контексте на той же БД. Тест `persistsAcrossRestartAndOtherContext` это закрепляет.
+- `SettingChanged` публикуется `ApplicationEventPublisher` внутри транзакции изменения, подписчики `@TransactionalEventListener(AFTER_COMMIT)`: откат события не даёт; исключение подписчика Spring 7.0 логирует `ERROR` и не пробрасывает, ответ 200.
+- `{key}` в `@PutMapping("/api/settings/{key}")` захватывает весь сегмент с точками; число JSON в `value` Jackson приводит к строке.
+- Версии нет: правка одного значения под `select ... for update`, журнал пишет действительное старое значение.
+- Тестовый подписчик лежит в `nmtest.settings` и подключается `@Import` только к `SettingChangedEventTest` (одна лишняя конфигурация контекста, по §12.2 это нужда, а не прихоть). `SettingsApiTest` и `SettingsServiceTest` работают в общем контексте `@IntegrationTest` и меняют только БД, которую возвращают в `@AfterEach`.
 
-**Обязательные тесты:**
-- Правка сохраняется, читается через `Settings` сразу и после `RestartableApp` (OPS-08).
-- Границы: минимум и максимум проходят; значение за границей, не число, пустое: 400. Неизвестный ключ: 404.
-- Откат транзакции не меняет кэш и не шлёт событие.
-- Дежурный 403; запись в `audit_log` со старым и новым значением.
-- Возврат настроек: `SettingsApiTest` (`@IntegrationTest`) в `@AfterEach` вызывает восстановление настроек `TestDb`, в том числе после `RestartableApp` и после упавшего теста. Причина: очистка `@IntegrationTest` идёт только перед тестом, а классы вне него (`SmokeTest`) и `RestartableApp` читают `system_setting` той же БД JVM. Это же правило для любого теста, меняющего настройки (§12.2).
+**Шаги:**
+1. `SettingDefinitions` (`final class`, пакетный, без экземпляров): вложенный `record Definition(String key, int min, int max)` с `String message()` = `"Целое число от " + min + " до " + max` и `Optional<String> violation(String value)`: `null` или несовпадение с `[1-9][0-9]{0,9}` (предкомпилированный `Pattern`) дают `Optional.of(message())`; иначе `Long.parseLong` и проверка `[min, max]`. `static final List<Definition> ALL` ровно шесть строк §13.2 в порядке `String.compareTo` ключа: `auth.lock_attempts` 1..100, `auth.lock_minutes` 1..1440, `retention.journal_days` 1..3650, `retention.results_days` 1..3650, `session.timeout_minutes` 1..43200, `traps.udp_port` 1..65535. `static Optional<Definition> find(String key)`: точное совпадение.
+2. `SettingView`: `public record SettingView(String key, String value, int min, int max)`; `SettingUpdate`: `public record SettingUpdate(String value)`. Порядок компонентов задаёт порядок полей JSON.
+3. `SettingsService` (`@Service`, пакетный, `implements Settings`; конструктор `(JdbcClient, Clock, AuditLog, ApplicationEventPublisher)`), строго по §7.2 «Настройки»:
+   - `public String get(String key)`, `public int getInt(String key)`: тексты исключений из §7.2 дословно.
+   - `List<SettingView> list()`: один `select key, value from system_setting`, результат в порядке `SettingDefinitions.ALL`; определённого ключа нет в строках: `IllegalStateException` «Нет строки system_setting для ключа <key>».
+   - `@Transactional SettingView update(String key, String value, Actor actor)`: нет определения `throw ApiException.notFound()`; `violation` даёт `throw ApiException.validation(List.of(new FieldError("value", сообщение)))`; затем замок, сравнение, `update`, журнал, событие; ответ `new SettingView(key, value, min, max)` и при равном значении.
+4. `SettingsController` (`@RestController`, пакетный): `@PreAuthorize("hasRole('ADMIN')") @GetMapping("/api/settings") List<SettingView> list()`; `@PreAuthorize("hasRole('ADMIN')") @PutMapping("/api/settings/{key}") SettingView update(@PathVariable String key, @RequestBody SettingUpdate body, @AuthenticationPrincipal CurrentUser user)` вызывает `service.update(key, body.value(), user.actor())`. Без `@Valid` и аннотаций Bean Validation: проверку делает `SettingDefinitions`.
+5. `settings.csv`: заголовок `метод,путь,OPERATOR,ADMIN,ANON`, строки `GET,/api/settings,deny,allow,deny` и `PUT,/api/settings/{key},deny,allow,deny`.
+6. `SettingEventsProbe` (`nmtest.settings`, `public class`, `@Component`): `public final List<SettingChanged> events = new CopyOnWriteArrayList<>()`, `public volatile boolean fail`; метод `@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT) void on(SettingChanged e)` добавляет событие и при `fail` бросает `IllegalStateException("probe failure")`.
+7. Замечания ревью T1.06 (по §5.1 `PeriodParams`, §7.2 «Запись журналов»):
+   - `SecretFieldGuard.isSecretName`: нормализация и подстроки по §7.2; `strip` без изменений.
+   - `NulGuard` по §7.2. `EventJournalService`: `details` = `writeValueAsString(NulGuard.tree(SecretFieldGuard.strip(valueToTree(details))))`, `description` через `NulGuard.text`, адрес приватным `static String host(InetAddress ip)`: `null` даёт `null`, иначе `getHostAddress()` до первого `%`. `AuditLogService`: тот же порядок в `toJson`, `objectId` в `insert` через `NulGuard.text` (в `details` события и в `description` он попадает исходным и чистится в `EventJournal`).
+   - `PeriodParams` по §5.1. `AuditController`: прежний блок `from.isAfter(to)` заменить вызовом `PeriodParams.check(from, to)` после `PageQuery.parse`.
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='SettingsApiTest,ArchitectureTest'`
+**Обязательные тесты (имена методов обязательны; тело читать `getContentAsString(StandardCharsets.UTF_8)`; транзакции через `new TransactionTemplate(PlatformTransactionManager)`; `Actor` из `TestData.user(Role.ADMIN)`; каждый класс, меняющий `system_setting`, несёт `@AfterEach void restore() { db.restoreSettings(); }` с внедрённым `TestDb`, без `try`/`finally` в теле метода):**
+- `SettingsApiTest` (`@IntegrationTest`; внедрены `Api`, `MockMvc`, `Settings`, `JdbcClient`, `TestDb`):
+  - `listsAllDefinedKeys`: `GET` от `ADMIN` 200, тело ровно `[{"key":"auth.lock_attempts","value":"5","min":1,"max":100},{"key":"auth.lock_minutes","value":"15","min":1,"max":1440},{"key":"retention.journal_days","value":"365","min":1,"max":3650},{"key":"retention.results_days","value":"30","min":1,"max":3650},{"key":"session.timeout_minutes","value":"720","min":1,"max":43200},{"key":"traps.udp_port","value":"162","min":1,"max":65535}]`.
+  - `updateAppliesImmediately` (OPS-08): `PUT /api/settings/auth.lock_attempts` `{"value":"7"}` 200, тело ровно `{"key":"auth.lock_attempts","value":"7","min":1,"max":100}`; сразу `settings.getInt(...)` = 7 и `settings.get(...)` = `"7"`; `updated_by` строки равен `id` пользователя `test-admin`.
+  - `bounds`: для каждого из шести ключей минимум и максимум дают 200 и читаются `getInt`; значения `"min-1"`, `"max+1"`, `""`, `"abc"`, `" 5"`, `"05"`, `"+5"`, `"-1"`, `"1.0"`, `"99999999999"`, JSON `null` и тело `{}` дают 400, тело ровно `{"code":"VALIDATION_FAILED","message":"Проверьте введённые данные","fields":[{"field":"value","message":"Целое число от <min> до <max>"}]}`; после них значение осталось максимумом.
+  - `bodyForms`: `{"value":8}` 200 и `value` `"8"`; `{"value":"9","extra":1}` 200; `{"value":true}` и `{"value":8.0}` 400 `VALIDATION_FAILED` с полем `value`; `{"value":{}}`, тело `[]` и запрос без тела 400 `BAD_JSON`; `PUT /api/settings/auth.lock_attempts.json` и `/api/settings/AUTH.LOCK_ATTEMPTS` 404 `NOT_FOUND`; `GET /api/settings/auth.lock_attempts` 405.
+  - `unknownKey`: `PUT /api/settings/no.such_key` с `{"value":"1"}` и с `{"value":"abc"}` 404, тело ровно `{"code":"NOT_FOUND","message":"Объект не найден","fields":[]}`; строк `system_setting` 6, `audit_log` 0.
+  - `auditRecordsOldAndNew` (LOG-04): `retention.results_days` `"45"` дважды подряд; в `audit_log` ровно одна строка: `user_login` `test-admin`, `action` `UPDATE`, `object_type` `setting`, `object_id` `retention.results_days`, `old_value::text` `{"value": "30"}`, `new_value::text` `{"value": "45"}`; в `event` одна строка `USER_ACTION` с `device_id is null`.
+  - `rights`: `OPERATOR` `GET` 403, тело ровно `{"code":"FORBIDDEN","message":"Недостаточно прав","fields":[]}`; `OPERATOR` `PUT` 403; без сессии (`MockMvc` напрямую) `GET` 401 и `PUT` с `.with(api.csrfToken())` 401; значение не изменилось, `audit_log` 0.
+  - `persistsAcrossRestartAndOtherContext` (OPS-08 «сохраняется», без перезапуска): `try (RestartableApp app = new RestartableApp(Map.of()).start())`: `Settings` из `app.context()` даёт 720; `PUT session.timeout_minutes` `"30"` через `Api` общего контекста; тот же бин `RestartableApp` сразу даёт 30; `app.restart()`, новый бин даёт 30.
+- `SettingsServiceTest` (`@IntegrationTest`, тот же пакет; внедрены `SettingsService`, `JdbcClient`, `PlatformTransactionManager`, `TestData`, `TestDb`):
+  - `rollbackKeepsValue`: в транзакции `update("auth.lock_minutes", "60", a)`, внутри неё `getInt` = 60, `setRollbackOnly()`; после неё `getInt` = 15, `audit_log` 0.
+  - `unknownKeyForReaders`: `get("no.such")` и `getInt("no.such")` дают `IllegalArgumentException`.
+  - `invalidStoredValue`: SQL `update system_setting set value = '0' where key = 'auth.lock_attempts'`; `getInt` даёт `IllegalStateException` с сообщением ровно `Недопустимое значение настройки auth.lock_attempts в БД`; `get` даёт `"0"`.
+  - `missingRow`: SQL удаляет строку `auth.lock_attempts`; `getInt`, `list()` и `update(..., "3", a)` дают `IllegalStateException`.
+  - `validationThrowsApiException`: `update("auth.lock_attempts", "0", a)` даёт `ApiException`; `update("nope", "1", a)` даёт `ApiException` с `code()` `NOT_FOUND`.
+  - `concurrentUpdatesSerialized`: поток 1 в транзакции `update(..., "10", a)` и ждёт `CountDownLatch`; после его записи поток 2 вызывает `update(..., "20", a)`; ожидание опросом с предельным сроком 10 с, пока в `pg_stat_activity` нет строки с `wait_event_type = 'Lock'` и `query like 'select value from system_setting%'` (без `sleep`); затем отпустить поток 1; оба `Future` завершаются; `audit_log` по `id` даёт ровно `5>10`, `10>20` (`old_value->>'value' || '>' || (new_value->>'value')`), `getInt` = 20. Пул потоков закрывается в `finally` (`shutdownNow`), защёлка отпускается и там.
+- `SettingChangedEventTest` (`@IntegrationTest` и `@Import(SettingEventsProbe.class)`; `@BeforeEach` очищает `probe.events` и `probe.fail = false`; `@AfterEach` `probe.fail = false` и `restoreSettings()`):
+  - `publishedAfterCommit`: `PUT traps.udp_port` `"10162"` 200; `probe.events` ровно `[new SettingChanged("traps.udp_port", "10162")]`.
+  - `notPublishedOnRollback`: в транзакции `update(...)`, внутри неё `probe.events` пуст, `setRollbackOnly()`; после неё пуст.
+  - `notPublishedForSameValue`: `PUT traps.udp_port` `"162"` 200, событий нет.
+  - `listenerFailureDoesNotFailRequest`: `probe.fail = true`, `PUT traps.udp_port` `"10163"` 200, тело `{"key":"traps.udp_port","value":"10163","min":1,"max":65535}`, `Settings.get` даёт `"10163"`.
+- Шаг 7, добавления в существующие классы:
+  - `SecretFieldGuardTest.keepsOtherFieldsAndValues`: вход заменить на `{"note":"password","description":"token secret","user":"u","key":"k","pairKey":"p","keyVersion":1,"snmpVersion":"V3","authProtocol":"SHA"}` (не меняется; прежний `passwordPolicy` теперь секретный). Новый `normalizedNames`: `isSecretName` истинно для `auth_password`, `priv-password`, `snmpCommunity`, `communityString`, `secret`, `token`, `apiKey`, `authKey`, `privKey`, `passphrase`, `privateKey`, `masterKey`, `passwordPolicy`, `PASS_WORD`, `x-Api-Key`, `Ciphertext`, `csrfToken`, `clientSecret`, `AUTH-KEY`; ложно для `key`, `pairKey`, `keyVersion`, `user`, `note`, `description`, `authProtocol`, `privProtocol`, `login`, `value`, `authKeyVersion`, `monkey`. `removesAtAnyDepth` без правок.
+  - `EventJournalWriteTest.ipv6ScopeDropped`: `Inet6Address.getByAddress(null, <16 байт fe80::1>, 7)` как `sourceIp` даёт `host(source_ip)` = `fe80::1`; адрес `2001:db8::2` без зоны даёт `2001:db8::2`. `EventJournalWriteTest.nulReplaced`: `description` `"d\u0000e"`, `details` `{"v":"a\u0000b","k\u0000":["\u0000"]}`; строка записана, `description` = `"d�e"`, `details = '{"v":"a�b","k�":["�"]}'::jsonb` истинно.
+  - `AuditLogTest.nulReplaced`: `record(actor, "UPDATE", "setting", "k\u0000", Map.of("v", "a\u0000"), null)`: `object_id` = `"k�"`, `old_value = '{"v":"a�"}'::jsonb`, `event.description` ровно `Действие пользователя adm-login: UPDATE setting k�`.
+  - `AuditApiTest.periodOutOfRange`: `get("/api/audit?from={f}", "+10000-01-01T00:00:00Z")`, то же с `"+100000-01-01T00:00:00Z"`, `?from=99999999999999999`, `?from=0000-12-31T23:59:59.999999Z` дают 400, тело ровно `{"code":"VALIDATION_FAILED","message":"Проверьте введённые данные","fields":[{"field":"from","message":"Дата вне диапазона 0001-01-01 .. 9999-12-31"}]}`; `get("/api/audit?to={t}", "+100000-01-01T00:00:00Z")` то же с полем `to`; `from={f}&to={t}` оба вне диапазона: два поля, `from` затем `to`; `?from=0001-01-01T00:00:00Z&to=9999-12-31T23:59:59.999999Z` 200. Прежний `badParameters` без правок проходит.
+- `ArchitectureTest`: зелёный без правок (`settings` зависит только от `contract` и `common`).
 
-**Критерии готовности:** тесты зелёные; ключи без определения не принимаются.
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='SettingsApiTest,SettingsServiceTest,SettingChangedEventTest,SecretFieldGuardTest,EventJournalWriteTest,AuditLogTest,AuditApiTest,ArchitectureTest'`; затем полный `mvn -B -pl server -am test -Dsurefire.runOrder=alphabetical` и то же с `reversealphabetical`, оба зелёные.
 
-**Запрещено:** применение настроек в чужих модулях.
+**Критерии готовности:** тесты зелёные в обоих порядках; ключи без определения не принимаются и не показываются; у `SettingsService` нет полей-кэшей значений; подписчик в тестах только `@TransactionalEventListener(AFTER_COMMIT)`; каждый тестовый класс, пишущий в `system_setting`, возвращает настройки в `@AfterEach`; в `server/src/test` нет `@DirtiesContext`, кроме `SmokeTest`; в отчёте перечислено непроверенное.
+
+**Запрещено:** кэш значений настроек; оптимистическая блокировка и миграции; применение настроек в чужих модулях (сессия T1.08, блокировка T1.09, порт трапов T4.11, сроки T3.05, T3.16, T3.23); `@EventListener` вместо `@TransactionalEventListener` для `SettingChanged`; Bean Validation на `SettingUpdate`; страница настроек (T1.32); изменение текстов и полей ответа `/api/audit`, кроме ошибки диапазона дат.
 
 ---
 
@@ -404,7 +451,7 @@
 
 **Контракты:** §5.1, §4.2 (`session.timeout_minutes`), §13.
 
-**Шаги:** при успешном входе `setMaxInactiveInterval(минуты*60)`. Реестр: `ConcurrentHashMap<Long, Set<HttpSession>>`, ключ `CurrentUser.id()` (решение ревью T1.05: `CurrentUser` не переопределяет `equals`/`hashCode`, сам principal ключом не служит, §5.1), очистка в `HttpSessionListener`, метод `terminateAll(long userId)` завершает все сессии пользователя, включая текущую. Поводы вызова: смена роли, отключение, сброс пароля (T1.11), смена своего пароля (T1.12, кроме текущей сессии). Секундное переопределение для теста: свойство `nm.session.timeout-seconds-override` только в профиле `test`.
+**Шаги:** при успешном входе `setMaxInactiveInterval(минуты*60)`. Реестр: `ConcurrentHashMap<Long, Set<HttpSession>>`, ключ `CurrentUser.id()` (решение ревью T1.05: `CurrentUser` не переопределяет `equals`/`hashCode`, сам principal ключом не служит, §5.1), очистка в `HttpSessionListener`, метод `terminateAll(long userId)` завершает все сессии пользователя, включая текущую. Поводы вызова: смена роли, отключение, сброс пароля (T1.11), смена своего пароля (T1.12, кроме текущей сессии). Секундное переопределение для теста: свойство `nm.session.timeout-seconds-override` только в профиле `test`. Срок читается `Settings.getInt("session.timeout_minutes")` при каждом успешном входе (без своего кэша, §7.2 «Настройки»; T1.07). `SessionExpiryTest` помечается `@IntegrationTest`, а меняет настройку только через `Api` или `JdbcClient` своего контекста и возвращает её в `@AfterEach` через `TestDb.restoreSettings()` (§12.2): `RestartableApp` видит новое значение сразу, перезапуск не нужен.
 
 **Сообщения LoginTest (ревью T1.05), других изменений `LoginTest` нет:** (1) `passwordStoredAsBcrypt`: `assertThat(hash).startsWith("$2a$10$")` заменить на `assertThat(hash.startsWith("$2a$10$")).as("password_hash начинается с $2a$10$").isTrue()`, чтобы упавшая проверка не печатала хэш; (2) `setCookie`: сообщение `AssertionError` перечисляет только имена cookie (`all.stream().map(v -> v.split("=", 2)[0]).toList()`), без значений.
 
@@ -432,7 +479,7 @@
 
 **Контракты:** §4.2 (`failed_attempts`, `locked_until`, настройки `auth.*`), §5.2 (`AUTH_LOCKED`).
 
-**Шаги:** увеличение одним `UPDATE ... SET failed_attempts = failed_attempts + 1, locked_until = CASE ... RETURNING`, без чтения перед записью. Успех сбрасывает счётчик. Срок считается по `Clock`. Заблокированный вход не проверяет пароль и счётчик не увеличивает.
+**Шаги:** увеличение одним `UPDATE ... SET failed_attempts = failed_attempts + 1, locked_until = CASE ... RETURNING`, без чтения перед записью. Успех сбрасывает счётчик. Срок считается по `Clock`. Заблокированный вход не проверяет пароль и счётчик не увеличивает. `auth.lock_attempts` и `auth.lock_minutes` читаются `Settings.getInt` при каждой неудаче (T1.07, без кэша); значения передаются в `UPDATE` параметрами; новая настройка не пересчитывает уже записанный `locked_until` (§13.2). Тест, меняющий `auth.*`, помечается `@IntegrationTest` и возвращает настройки в `@AfterEach` через `TestDb.restoreSettings()`.
 
 **Обязательные тесты:**
 - Граница: `N-1` неудач вход разрешён, `N`-я блокирует; верный пароль при блокировке даёт `AUTH_LOCKED`.
@@ -1094,7 +1141,7 @@
 
 **Контракты:** §5.2, §11, OPS-08.
 
-**Шаги:** подписи ключей настроек на русском в файле страницы; неизвестный ключ показывается как есть, а не теряется. Значения старое и новое показываются как текст.
+**Шаги:** подписи ключей настроек на русском в файле страницы; неизвестный ключ показывается как есть, а не теряется. Значения старое и новое показываются как текст. Границы поля ввода берутся из `min`/`max` ответа `GET /api/settings` (§5.2 «Настройки»), а не из кода страницы; сообщение об ошибке берётся из `fields[0].message` ответа 400.
 
 **Обязательные тесты:**
 - Правка настройки сохраняется и видна после обновления страницы; значение за границей даёт сообщение.
