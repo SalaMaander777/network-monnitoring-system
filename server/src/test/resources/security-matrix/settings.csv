@@ -1,0 +1,3 @@
+метод,путь,OPERATOR,ADMIN,ANON
+GET,/api/settings,deny,allow,deny
+PUT,/api/settings/{key},deny,allow,deny

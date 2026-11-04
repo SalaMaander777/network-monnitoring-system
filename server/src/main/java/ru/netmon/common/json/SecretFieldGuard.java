@@ -1,5 +1,6 @@
 package ru.netmon.common.json;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import tools.jackson.databind.JsonNode;
@@ -7,13 +8,17 @@ import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 public final class SecretFieldGuard {
-  private static final Set<String> NAMES = Set.of("password", "oldpassword", "newpassword", "passwordhash",
-      "password_hash", "community", "authpassword", "privpassword", "ciphertext");
+  private static final List<String> PARTS = List.of("password", "passphrase", "secret", "token", "community",
+      "ciphertext", "privatekey", "apikey");
+  private static final Set<String> EXACT = Set.of("authkey", "privkey", "masterkey");
 
   private SecretFieldGuard() {}
 
   public static boolean isSecretName(String name) {
-    return NAMES.contains(name.toLowerCase(Locale.ROOT));
+    String n = name.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
+    if (EXACT.contains(n)) return true;
+    for (String p : PARTS) if (n.contains(p)) return true;
+    return false;
   }
 
   public static JsonNode strip(JsonNode node) {

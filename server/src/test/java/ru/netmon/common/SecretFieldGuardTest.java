@@ -21,7 +21,8 @@ class SecretFieldGuardTest {
 
   @Test
   void keepsOtherFieldsAndValues() {
-    JsonNode in = json.readTree("{\"note\":\"password\",\"passwordPolicy\":\"community\",\"user\":\"u\"}");
+    JsonNode in = json.readTree("{\"note\":\"password\",\"description\":\"token secret\",\"user\":\"u\","
+        + "\"key\":\"k\",\"pairKey\":\"p\",\"keyVersion\":1,\"snmpVersion\":\"V3\",\"authProtocol\":\"SHA\"}");
     assertThat(SecretFieldGuard.strip(in)).isEqualTo(in);
   }
 
@@ -40,5 +41,18 @@ class SecretFieldGuardTest {
     JsonNode n = json.readTree("42");
     assertThat(SecretFieldGuard.strip(s)).isEqualTo(s);
     assertThat(SecretFieldGuard.strip(n)).isEqualTo(n);
+  }
+
+  @Test
+  void normalizedNames() {
+    for (String n : new String[] {"auth_password", "priv-password", "snmpCommunity", "communityString", "secret",
+        "token", "apiKey", "authKey", "privKey", "passphrase", "privateKey", "masterKey", "passwordPolicy",
+        "PASS_WORD", "x-Api-Key", "Ciphertext", "csrfToken", "clientSecret", "AUTH-KEY"}) {
+      assertThat(SecretFieldGuard.isSecretName(n)).as(n).isTrue();
+    }
+    for (String n : new String[] {"key", "pairKey", "keyVersion", "user", "note", "description", "authProtocol",
+        "privProtocol", "login", "value", "authKeyVersion", "monkey"}) {
+      assertThat(SecretFieldGuard.isSecretName(n)).as(n).isFalse();
+    }
   }
 }

@@ -1,16 +1,14 @@
 package ru.netmon.audit;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import ru.netmon.common.web.ApiException;
-import ru.netmon.common.web.FieldError;
 import ru.netmon.common.web.PageQuery;
 import ru.netmon.common.web.PageResponse;
+import ru.netmon.common.web.PeriodParams;
 
 @RestController
 class AuditController {
@@ -28,9 +26,7 @@ class AuditController {
       @RequestParam(required = false) Long userId, @RequestParam(required = false) String objectType,
       @RequestParam(required = false) Instant from, @RequestParam(required = false) Instant to) {
     PageQuery q = PageQuery.parse(page, size, sort, Map.of("ts", "ts"), "ts,desc");
-    if (from != null && to != null && from.isAfter(to)) {
-      throw ApiException.validation(List.of(new FieldError(null, "Начало периода позже конца")));
-    }
+    PeriodParams.check(from, to);
     AuditRepository.Filter f = new AuditRepository.Filter(userId, objectType, from, to);
     long total = repository.count(f);
     return PageResponse.of(repository.page(f, q), q, total);

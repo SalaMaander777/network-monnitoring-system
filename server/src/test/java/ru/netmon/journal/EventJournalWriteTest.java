@@ -115,4 +115,29 @@ class EventJournalWriteTest {
         .isInstanceOf(NullPointerException.class);
     assertThat(events()).isZero();
   }
+
+  @Test
+  void ipv6ScopeDropped() throws Exception {
+    java.net.Inet6Address a = java.net.Inet6Address.getByAddress(null,
+        new byte[] {(byte) 0xfe, (byte) 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 7);
+    tx().executeWithoutResult(s -> journal.record(EventType.TRAP_UNKNOWN_SOURCE, null, a, "x", null, TS));
+    assertThat(jdbc.sql("select host(source_ip) from event").query(String.class).single()).isEqualTo("fe80::1");
+    tx().executeWithoutResult(s -> {
+      try {
+        journal.record(EventType.TRAP_UNKNOWN_SOURCE, null, InetAddress.getByAddress(new byte[] {(byte) 0x20, 1, 0x0d, (byte) 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}), "x", null, TS);
+      } catch (java.net.UnknownHostException e) { throw new IllegalStateException(e); }
+    });
+    assertThat(jdbc.sql("select host(source_ip) from event order by id desc limit 1").query(String.class).single()).isEqualTo("2001:db8::2");
+  }
+
+  @Test
+  void nulReplaced() {
+    Map<String, Object> details = new HashMap<>();
+    details.put("v", "a\u0000b");
+    details.put("k\u0000", java.util.List.of("\u0000"));
+    tx().executeWithoutResult(s -> journal.record(EventType.TRAP, null, null, "d\u0000e", details, TS));
+    var row = jdbc.sql("select description, details = '{\"v\":\"a\uFFFDb\",\"k\uFFFD\":[\"\uFFFD\"]}'::jsonb as d from event").query().singleRow();
+    assertThat(row.get("description")).isEqualTo("d\uFFFDe");
+    assertThat(row.get("d")).isEqualTo(true);
+  }
 }

@@ -171,4 +171,18 @@ class AuditApiTest {
     ResultActions anon = mvc.perform(get("/api/audit")).andExpect(status().isUnauthorized());
     assertThat(json.readTree(body(anon)).get("code").asString()).isEqualTo("AUTH_REQUIRED");
   }
+
+  @Test
+  void periodOutOfRange() throws Exception {
+    String err = "{\"code\":\"VALIDATION_FAILED\",\"message\":\"Проверьте введённые данные\",\"fields\":[{\"field\":\"%s\",\"message\":\"Дата вне диапазона 0001-01-01 .. 9999-12-31\"}]}";
+    String from = err.formatted("from");
+    assertThat(body(api.as(Role.ADMIN).get("/api/audit?from={f}", "+10000-01-01T00:00:00Z").andExpect(status().isBadRequest()))).isEqualTo(from);
+    assertThat(body(api.as(Role.ADMIN).get("/api/audit?from={f}", "+100000-01-01T00:00:00Z").andExpect(status().isBadRequest()))).isEqualTo(from);
+    assertThat(body(api.as(Role.ADMIN).get("/api/audit?from=99999999999999999").andExpect(status().isBadRequest()))).isEqualTo(from);
+    assertThat(body(api.as(Role.ADMIN).get("/api/audit?from=0000-12-31T23:59:59.999999Z").andExpect(status().isBadRequest()))).isEqualTo(from);
+    assertThat(body(api.as(Role.ADMIN).get("/api/audit?to={t}", "+100000-01-01T00:00:00Z").andExpect(status().isBadRequest()))).isEqualTo(err.formatted("to"));
+    assertThat(body(api.as(Role.ADMIN).get("/api/audit?from={f}&to={t}", "+10000-01-01T00:00:00Z", "+10001-01-01T00:00:00Z").andExpect(status().isBadRequest())))
+        .isEqualTo("{\"code\":\"VALIDATION_FAILED\",\"message\":\"Проверьте введённые данные\",\"fields\":[{\"field\":\"from\",\"message\":\"Дата вне диапазона 0001-01-01 .. 9999-12-31\"},{\"field\":\"to\",\"message\":\"Дата вне диапазона 0001-01-01 .. 9999-12-31\"}]}");
+    api.as(Role.ADMIN).get("/api/audit?from=0001-01-01T00:00:00Z&to=9999-12-31T23:59:59.999999Z").andExpect(status().isOk());
+  }
 }

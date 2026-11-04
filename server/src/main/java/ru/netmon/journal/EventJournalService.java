@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import ru.netmon.common.json.NulGuard;
 import ru.netmon.common.json.SecretFieldGuard;
 import ru.netmon.contract.EventJournal;
 import ru.netmon.contract.EventType;
@@ -32,10 +33,17 @@ class EventJournalService implements EventJournal {
     Objects.requireNonNull(t, "t");
     Objects.requireNonNull(description, "description");
     Objects.requireNonNull(ts, "ts");
-    String d = details == null ? null : json.writeValueAsString(SecretFieldGuard.strip(json.valueToTree(details)));
+    String d = details == null ? null : json.writeValueAsString(NulGuard.tree(SecretFieldGuard.strip(json.valueToTree(details))));
     jdbc.sql("insert into event(ts, device_id, type, source_ip, description, details) values (?, ?, ?, ?::inet, ?, ?::jsonb)")
         .params(OffsetDateTime.ofInstant(ts, ZoneOffset.UTC), deviceId, t.name(),
-            sourceIp == null ? null : sourceIp.getHostAddress(), description, d)
+            host(sourceIp), NulGuard.text(description), d)
         .update();
+  }
+
+  private static String host(InetAddress ip) {
+    if (ip == null) return null;
+    String h = ip.getHostAddress();
+    int p = h.indexOf('%');
+    return p < 0 ? h : h.substring(0, p);
   }
 }

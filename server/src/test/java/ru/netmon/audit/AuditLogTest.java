@@ -190,4 +190,14 @@ class AuditLogTest {
     assertThat(count("audit_log")).isZero();
     assertThat(count("event")).isZero();
   }
+
+  @Test
+  void nulReplaced() {
+    Actor actor = new Actor(data.user(Role.ADMIN), "adm-login");
+    tx().executeWithoutResult(s -> audit.record(actor, "UPDATE", "setting", "k\u0000", Map.of("v", "a\u0000"), null));
+    var row = jdbc.sql("select object_id, old_value = '{\"v\":\"a\uFFFD\"}'::jsonb d from audit_log").query().singleRow();
+    assertThat(row.get("object_id")).isEqualTo("k\uFFFD");
+    assertThat(row.get("d")).isEqualTo(true);
+    assertThat(jdbc.sql("select description from event").query(String.class).single()).isEqualTo("Действие пользователя adm-login: UPDATE setting k\uFFFD");
+  }
 }

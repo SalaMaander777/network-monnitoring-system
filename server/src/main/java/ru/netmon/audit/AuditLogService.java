@@ -9,6 +9,7 @@ import java.util.regex.Pattern;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import ru.netmon.common.json.NulGuard;
 import ru.netmon.common.json.SecretFieldGuard;
 import ru.netmon.contract.Actor;
 import ru.netmon.contract.AuditLog;
@@ -30,7 +31,7 @@ class AuditLogService implements AuditLog {
   }
 
   private String toJson(Object v) {
-    return v == null ? null : json.writeValueAsString(SecretFieldGuard.strip(json.valueToTree(v)));
+    return v == null ? null : json.writeValueAsString(NulGuard.tree(SecretFieldGuard.strip(json.valueToTree(v))));
   }
 
   @Override
@@ -40,7 +41,7 @@ class AuditLogService implements AuditLog {
     if (action == null || !ACTION.matcher(action).matches()) throw new IllegalArgumentException("action");
     if (objectType == null || !OBJECT_TYPE.matcher(objectType).matches()) throw new IllegalArgumentException("objectType");
     Instant ts = clock.instant();
-    long id = repository.insert(ts, a, action, objectType, objectId, toJson(oldValue), toJson(newValue));
+    long id = repository.insert(ts, a, action, objectType, NulGuard.text(objectId), toJson(oldValue), toJson(newValue));
     Map<String, Object> details = new LinkedHashMap<>();
     details.put("auditId", id);
     details.put("userId", a.userId());
