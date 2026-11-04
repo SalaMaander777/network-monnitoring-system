@@ -285,8 +285,9 @@
 
 **Файлы:**
 - Новые в `main`: `S/common/json/SecretFieldGuard.java`, `S/audit/AuditLogService.java`, `S/audit/AuditRepository.java`, `S/audit/AuditEntry.java`, `S/audit/AuditController.java`, `S/journal/EventJournalService.java`.
-- Тесты: новые `T/common/SecretFieldGuardTest.java`, `T/audit/AuditLogTest.java`, `T/audit/AuditApiTest.java`, `T/journal/EventJournalWriteTest.java`, `server/src/test/resources/security-matrix/audit.csv`.
-- Не правятся: `contract/`, миграции, `SecurityConfig`, `ApiErrorHandler`, `CurrentUser`, помощники `T/testsupport/`, `auth.csv`, существующие тесты. Зависимости не добавляются (Jackson 3 и `spring-tx` уже есть).
+- Тесты: новые `T/common/SecretFieldGuardTest.java`, `T/audit/AuditLogTest.java`, `T/audit/AuditApiTest.java`, `T/journal/EventJournalWriteTest.java`, `T/testsupport/ApiSelfTest.java`, `server/src/test/resources/security-matrix/audit.csv`.
+- Правятся (дефект помощника T1.03, шаг 8): `T/testsupport/Api.java`, `T/common/ApiErrorsTest.java` (только две замены `.with(csrf())` и импорт).
+- Не правятся: `contract/`, миграции, `SecurityConfig`, `ApiErrorHandler`, `CurrentUser`, остальные помощники `T/testsupport/`, `auth.csv`, остальные существующие тесты. Зависимости не добавляются (Jackson 3 и `spring-tx` уже есть).
 
 **Контракты:** §7.2 (`AuditLog`, `EventJournal`, абзац «Запись журналов»), §5.2 (`GET /api/audit`, абзац «Журнал действий и журнал событий»), §5.1 (`PageQuery`, ошибки), §4.2 (`audit_log`, `event`), §2.1, §2.2, §10.4, §12.2, §12.3, §14.
 
@@ -296,6 +297,7 @@
 - `Instant` в SQL только как `OffsetDateTime` UTC; JSON в `jsonb` строкой с `?::jsonb`; `inet` строкой `getHostAddress()` с `?::inet`.
 - `SecretFieldGuard` в `common`, а не в `audit`: его вызывает и `journal` (§2.2 п. 1).
 - Хранение (удаление по сроку) не входит: `event` T3.16, `audit_log` T3.23 (§4.3).
+- Помощники и тесты не меняют состояние общего контекста (§12.2). `Api` берёт настоящий токен CSRF (`csrfToken()`), а не `SecurityMockMvcRequestPostProcessors.csrf()`: тот навсегда заменяет хранилище токенов в `CsrfFilter` кешированного контекста, и следующие в том же контексте `CsrfTest`, `LoginTest` теряют cookie `XSRF-TOKEN` (проверено прототипом: без правки 8 падений в порядке `alphabetical`; с правкой 99 тестов зелёные в `alphabetical` и `reversealphabetical`). `@DirtiesContext` на `AuditApiTest` не ставится.
 
 **Шаги:**
 1. `SecretFieldGuard` по §7.2 «Запись журналов»: набор имён, сравнение без учёта регистра по `Locale.ROOT`, `strip` на глубокой копии (удаление полей у `ObjectNode`, обход значений `ObjectNode` и `ArrayNode`; в Jackson 3 `properties()` изменяемо, `removeIf` по ключу работает).
@@ -305,6 +307,25 @@
 5. `AuditLogService` (`@Service`, пакетный, `implements AuditLog`; конструктор `(AuditRepository, JsonMapper, Clock, EventJournal)`): проверки и шаблоны `action`/`objectType`, время, `deviceId`, `description`, `details` строго по §7.2 «Запись журналов»; порядок: проверки, `clock.instant()`, сериализация обоих значений, `insert`, `events.record(...)`.
 6. `AuditController` (`@RestController`, пакетный): `@PreAuthorize("hasRole('ADMIN')") @GetMapping("/api/audit") PageResponse<AuditEntry> list(@RequestParam(required = false) String page, String size, String sort, Long userId, String objectType, Instant from, Instant to)` (каждый параметр `@RequestParam(required = false)`); сначала `PageQuery.parse(page, size, sort, Map.of("ts", "ts"), "ts,desc")`, затем при `from != null && to != null && from.isAfter(to)` `throw ApiException.validation(List.of(new FieldError(null, "Начало периода позже конца")))`, затем `count` и `page`, ответ `PageResponse.of(items, q, total)`.
 7. `audit.csv`: заголовок `метод,путь,OPERATOR,ADMIN,ANON` и ровно одна строка `GET,/api/audit,deny,allow,deny`.
+8. `Api` по §12.2 (строка `Api`): убрать статический импорт `SecurityMockMvcRequestPostProcessors.csrf` и `.with(csrf())` в `As.send`; добавить `private static final Set<HttpMethod> SAFE = Set.of(GET, HEAD, OPTIONS, TRACE)` и метод
+   ```java
+   public RequestPostProcessor csrfToken() throws Exception {
+       Cookie c = mvc.perform(MockMvcRequestBuilders.get("/api/auth/csrf")).andReturn().getResponse()
+               .getCookie("XSRF-TOKEN");
+       if (c == null) {
+           throw new IllegalStateException("GET /api/auth/csrf не выдал cookie XSRF-TOKEN");
+       }
+       return request -> {
+           Cookie[] old = request.getCookies();
+           Cookie[] all = old == null ? new Cookie[1] : Arrays.copyOf(old, old.length + 1);
+           all[all.length - 1] = c;
+           request.setCookies(all);
+           request.addHeader("X-XSRF-TOKEN", c.getValue());
+           return request;
+       };
+   }
+   ```
+   (`jakarta.servlet.http.Cookie`, `org.springframework.test.web.servlet.request.RequestPostProcessor`); в `As.send` после `.with(authentication(token(role)))`: `if (!SAFE.contains(method)) { b.with(csrfToken()); }`. Javadoc класса: изменяющий запрос несёт настоящий токен, `csrf()` не используется, потому что меняет общий контекст. В `ApiErrorsTest` обе `.with(csrf())` (методы `springErrors`, `unsupportedMediaTypeHasAccept`) заменить на `.with(api.csrfToken())`, статический импорт `csrf` удалить. С `AuditApiTest` снять `@DirtiesContext(AFTER_CLASS)`, его импорт и комментарий-обход.
 
 **Обязательные тесты (имена методов обязательны; тело читать `getContentAsString(StandardCharsets.UTF_8)`; транзакции в тестах через `new TransactionTemplate(PlatformTransactionManager)`; пользователь для `Actor` создаётся `TestData.user(Role.ADMIN)`, иначе нарушается внешний ключ `audit_log.user_id`; время через `MutableClock.set`):**
 - `SecretFieldGuardTest` (без Spring, `JsonMapper.builder().build()`):
@@ -334,14 +355,17 @@
   - `filters`: два пользователя, два `objectType`, записи на `2026-03-01T00:00:00Z` и `2026-03-01T00:00:10Z`: `userId`, `objectType`, `from` (включительно), `to` (исключительно) и их сочетание дают ожидаемые множества `id` и `total`; `from=…:10Z&to=…:10Z` даёт `total` 0; неизвестный `userId` 200 с `total` 0.
   - `badParameters`: `from=abc`, `from=2026-03-01` 400 `BAD_PARAMETER` с полем `from`; `to=abc` с полем `to`; `userId=x` с полем `userId`; `from=2026-03-02T00:00:00Z&to=2026-03-01T00:00:00Z` 400, тело ровно `{"code":"VALIDATION_FAILED","message":"Проверьте введённые данные","fields":[{"field":null,"message":"Начало периода позже конца"}]}`; `sort=id` и `size=0` 400 `VALIDATION_FAILED` с полем `sort` и `size`.
   - `rights`: `OPERATOR` 403, тело ровно `{"code":"FORBIDDEN","message":"Недостаточно прав","fields":[]}`; без сессии (бин `MockMvc` напрямую) 401 `AUTH_REQUIRED`.
+- `ApiSelfTest` (`@IntegrationTest`, внедрённые `Api`, `MockMvc`):
+  - `mutatingRequestCarriesRealCsrfToken`: `api.as(OPERATOR).post("/api/no-such-resource", "{}")` и `api.as(ADMIN).delete("/api/no-such-resource")` дают 404 (не 403 `CSRF_INVALID`).
+  - `sharedContextCsrfIntact`: после `api.as(OPERATOR).post(...)` анонимный `GET /api/auth/csrf` через `MockMvc` даёт 204 и cookie `XSRF-TOKEN` не `null` (со старым `csrf()` cookie нет).
 - `ArchitectureTest`: зелёный без правок (`audit` и `journal` зависят только от `contract` и `common`; контроллер с `@PreAuthorize`).
 - Существующие тесты без правок зелёные (проверено прототипом: `TestDb.clean()` уже очищает `audit_log` и `event`).
 
-**Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretFieldGuardTest,EventJournalWriteTest,AuditLogTest,AuditApiTest,ArchitectureTest'`
+**Команда проверки:** `mvn -B -pl server -am test -Dtest='SecretFieldGuardTest,EventJournalWriteTest,AuditLogTest,AuditApiTest,ApiSelfTest,ArchitectureTest'`; затем полный `mvn -B -pl server -am test -Dsurefire.runOrder=alphabetical` и то же с `reversealphabetical`, оба зелёные.
 
-**Критерии готовности:** тесты зелёные; запись участвует в транзакции вызывающего (`MANDATORY`, не `REQUIRES_NEW`); значения в журнал идут только через `SecretFieldGuard`; в отчёте перечислено непроверенное.
+**Критерии готовности:** тесты зелёные, полный прогон зелёный в обоих порядках; в `server/src/test` нет вызовов `SecurityMockMvcRequestPostProcessors.csrf` (`grep -rn 'csrf()' server/src/test` находит только javadoc `Api`) и нет `@DirtiesContext`, кроме `SmokeTest`; запись участвует в транзакции вызывающего (`MANDATORY`, не `REQUIRES_NEW`); значения в журнал идут только через `SecretFieldGuard`; в отчёте перечислено непроверенное.
 
-**Запрещено:** правка `contract/` и миграций; запись журналов вне транзакции вызывающего или после фиксации; копирование `oldValue`/`newValue` в `event.details`; свой `JsonMapper` вместо бина; поиск по журналу событий и `GET /api/events` (T3.15); удаление по сроку (T3.16, T3.23); страница (T1.32); запись журнала при входе и выходе (ТЗ не требует).
+**Запрещено:** правка `contract/` и миграций; `SecurityMockMvcRequestPostProcessors.csrf()` и `@DirtiesContext` как обход побочных эффектов в тестах; запись журналов вне транзакции вызывающего или после фиксации; копирование `oldValue`/`newValue` в `event.details`; свой `JsonMapper` вместо бина; поиск по журналу событий и `GET /api/events` (T3.15); удаление по сроку (T3.16, T3.23); страница (T1.32); запись журнала при входе и выходе (ТЗ не требует).
 
 ---
 
